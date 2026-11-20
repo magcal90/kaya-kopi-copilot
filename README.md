@@ -10,7 +10,7 @@ Prerequisite: Docker Desktop, or Docker Engine with Docker Compose v2.
 
 ```bash
 git clone <repository-url>
-cd team1_kaya_kopi
+cd team1_kaya_kopi_prototype
 cp .env.example .env
 # Configure the passwords, ports and OPENAI_API_KEY in .env.
 # Copy the client package contents into data/; see data/README.md.
@@ -70,10 +70,6 @@ See [ingestion/README.md](ingestion/README.md) for individual parser, schema and
 - 5-minute pitch
 - Honest post-mortem (what you'd do differently)
 
-## Timeline
 
-Briefing Mon 16 Nov (Zoom) · **Checkpoint 1 Fri 20 Nov, 17:00 (repo review; no meeting)** · Checkpoint 2 Mon 23 Nov · Consults Mon 23 and Tue 24 Nov (Zoom) · Final sprint Thu 26 Nov · **Demo Fri 27 Nov 09:00–13:00, SR902** (slot order announced Tue 24 Nov). Details: [CHECKPOINTS.md](CHECKPOINTS.md).
 
-## Real commit
-- Chandra
-- Andri
+
