@@ -40,6 +40,32 @@ class QueryToolIntegrationTest(unittest.TestCase):
         self.assertEqual(sum(int(row["invoice_count"]) for row in result["results"]), 68)
         self.assertEqual(result["excluded_review_required_invoices"], 1)
 
+    def test_analyze_suppliers_spend_identifies_excluded_invoice(self) -> None:
+        result = analyze_suppliers.invoke(
+            {
+                "analysis": "spend",
+                "start_date": "2025-07-01",
+                "end_date": "2026-06-30",
+                "group_by": "supplier_month",
+            }
+        )
+
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(result["included_invoice_count"], 68)
+        self.assertEqual(result["excluded_invoice_count"], 1)
+        self.assertEqual(
+            result["excluded_invoices"],
+            [
+                {
+                    "invoice_number": "INV-012601-458",
+                    "supplier_name": "HENG HUAT COFFEE ROASTERS",
+                    "invoice_date": "2026-01-21",
+                    "reason": "REVIEW_REQUIRED",
+                    "source_uri": "data/images/supplier_invoices/INV-012601-458.jpg",
+                }
+            ],
+        )
+
     def test_analyze_suppliers_returns_2025_invoice_totals_by_month(self) -> None:
         result = analyze_suppliers.invoke(
             {
@@ -58,6 +84,31 @@ class QueryToolIntegrationTest(unittest.TestCase):
             0,
         )
 
+    def test_supplier_price_change_identifies_largest_comparable_increase_with_evidence(self) -> None:
+        result = analyze_suppliers.invoke(
+            {
+                "analysis": "price_change",
+                "start_date": "2025-07-01",
+                "end_date": "2026-06-30",
+            }
+        )
+
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(result["status"], "PARTIAL")
+        self.assertGreater(result["comparable_series_count"], 0)
+        self.assertGreater(result["insufficient_series_count"], 0)
+        largest = result["largest_increase"]
+        self.assertEqual(largest["supplier_code"], "SUP-04")
+        self.assertEqual(largest["supplier_name"], "MEWAH SUGAR TRADING")
+        self.assertEqual(largest["description"], "Condensed milk ctn")
+        self.assertEqual(largest["first_unit_price_sgd"], "43.8000")
+        self.assertEqual(largest["latest_unit_price_sgd"], "50.4700")
+        self.assertEqual(largest["percent_change"], "15.23")
+        self.assertIn("invoice_number", largest["first_evidence"])
+        self.assertIn("citation", largest["first_evidence"])
+        self.assertIn("invoice_number", largest["latest_evidence"])
+        self.assertIn("citation", largest["latest_evidence"])
+
     def test_analyze_suppliers_reconciliation_keeps_reused_invoice_number(self) -> None:
         result = analyze_suppliers.invoke(
             {"analysis": "reconciliation", "invoice_number": "INV-042509-752"}
@@ -68,6 +119,27 @@ class QueryToolIntegrationTest(unittest.TestCase):
             {row["reconciliation_status"] for row in result["results"]},
             {"MATCHED", "NO_SCAN"},
         )
+
+    def test_reconciliation_distinguishes_identity_match_from_amount_match_and_gst(self) -> None:
+        result = analyze_suppliers.invoke(
+            {"analysis": "reconciliation", "invoice_number": "INV-012508-182"}
+        )
+
+        self.assertTrue(result["ok"], result)
+        row = result["results"][0]
+        self.assertTrue(row["identity_match"])
+        self.assertFalse(row["amount_match"])
+        self.assertEqual(row["legacy_subtotal_sgd"], "942.00")
+        self.assertEqual(row["scanned_subtotal_sgd"], "951.33")
+        self.assertEqual(row["subtotal_difference_sgd"], "9.33")
+        self.assertFalse(row["gst_responsible"])
+        self.assertEqual(row["cause"], "UNDETERMINED")
+        self.assertEqual(
+            row["gst_explanation"],
+            "GST cannot explain this difference because both compared values are pre-GST subtotals.",
+        )
+        self.assertTrue(result["invoice_evidence"]["found"])
+        self.assertTrue(result["invoice_evidence"]["items"])
 
     def test_data_coverage_reports_known_source_counts(self) -> None:
         result = get_data_coverage.invoke({"area": "all"})
@@ -99,6 +171,26 @@ class QueryToolIntegrationTest(unittest.TestCase):
         self.assertEqual(result["results"][0]["gross_takings_sgd"], "815.51")
         self.assertEqual(result["results"][0]["receipt_count"], 263)
 
+    def test_analyze_outlets_preserves_alias_resolution_evidence(self) -> None:
+        result = analyze_outlets.invoke(
+            {
+                "analysis": "performance",
+                "outlet_codes": ["AMK-3A"],
+                "start_date": "2026-01-01",
+                "end_date": "2026-01-31",
+            }
+        )
+
+        self.assertTrue(result["ok"], result)
+        row = result["results"][0]
+        self.assertEqual(row["requested_outlet_code"], "AMK-3A")
+        self.assertEqual(row["outlet_code"], "AMK-03")
+        self.assertEqual(row["alias_resolution"]["canonical_code"], "AMK-03")
+        self.assertEqual(
+            row["alias_resolution"]["evidence_source_uri"],
+            "data/docs/emails/2026-05-18_outlet_rename.txt",
+        )
+
     def test_analyze_outlets_wastage_discloses_unrecorded_outlets(self) -> None:
         result = analyze_outlets.invoke(
             {
@@ -115,6 +207,28 @@ class QueryToolIntegrationTest(unittest.TestCase):
         self.assertGreater(by_outlet["BDK-01"]["measured_days"], 0)
         self.assertEqual(by_outlet["JUR-01"]["coverage_status"], "NOT_RECORDED")
         self.assertIsNone(by_outlet["JUR-01"]["total_wastage_kg"])
+
+    def test_analyze_outlets_wastage_ranks_only_measured_outlets(self) -> None:
+        result = analyze_outlets.invoke(
+            {
+                "analysis": "wastage",
+                "outlet_codes": [],
+                "start_date": "2025-07-01",
+                "end_date": "2026-06-30",
+            }
+        )
+
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(result["status"], "PARTIAL")
+        self.assertFalse(result["all_outlets_comparable"])
+        self.assertEqual(result["comparison_scope"], "MEASURED_OUTLETS_ONLY")
+        self.assertEqual(result["measured_outlet_count"], 2)
+        self.assertEqual(result["highest_measured_wastage"]["outlet_code"], "BDK-01")
+        self.assertEqual(result["highest_measured_wastage"]["total_wastage_kg"], "640.400")
+        self.assertEqual(
+            [row["outlet_code"] for row in result["ranked_measured_results"]],
+            ["BDK-01", "WDL-01"],
+        )
 
     def test_analyze_outlets_staffing_expands_weekly_roster_and_labels_revenue_coverage(self) -> None:
         result = analyze_outlets.invoke(
@@ -134,6 +248,27 @@ class QueryToolIntegrationTest(unittest.TestCase):
         self.assertTrue(by_outlet["AMK-01"]["productivity_comparable"])
         self.assertEqual(by_outlet["ORC-01"]["revenue_authority"], "PARTIAL_POS_EXPORT")
         self.assertFalse(by_outlet["ORC-01"]["productivity_comparable"])
+
+    def test_analyze_outlets_staffing_does_not_invent_overstaffing_threshold(self) -> None:
+        result = analyze_outlets.invoke(
+            {
+                "analysis": "staffing",
+                "outlet_codes": [],
+                "start_date": "2026-06-01",
+                "end_date": "2026-06-30",
+            }
+        )
+
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(result["classification"], "NO_APPROVED_OVERSTAFFING_THRESHOLD")
+        self.assertEqual(result["lowest_comparable_productivity"]["outlet_code"], "BDK-01")
+        self.assertEqual(
+            {row["outlet_code"] for row in result["non_comparable_outlets"]},
+            {"JEM-01", "ORC-01", "PGL-01", "VIV-01"},
+        )
+        self.assertTrue(
+            all(row["productivity_comparable"] for row in result["comparable_outlets"])
+        )
 
     def test_get_outlet_sales_uses_authoritative_daily_summary_when_available(self) -> None:
         result = get_outlet_sales.invoke(

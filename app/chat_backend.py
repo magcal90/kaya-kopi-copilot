@@ -28,6 +28,14 @@ missing, say exactly what could not be checked. Scanned supplier invoices are au
 supplier costs when they conflict with the legacy purchase table; if an invoice header is internally
 inconsistent, use validated line arithmetic and disclose the review flag. Keep answers concise and use SGD
 for monetary amounts. The tools are read-only; do not claim to change client data.
+
+Follow tool status, conclusions, authority, comparison scope, exclusions, and limitations exactly.
+Do not rank records marked non-comparable. Do not turn missing evidence into zero, no change, or a
+negative finding. MATCHED reconciliation means that a purchase and scan were linked; it does not mean
+their amounts agree. A difference between two pre-GST subtotals is not caused by GST. Do not classify
+an outlet as overstaffed without an approved threshold. When asked for supplier spending by month,
+use supplier_month grouping and report excluded invoices. When asked which supplier increased prices
+most, report the largest comparable percentage change and its first/latest invoice-line evidence.
 """
 
 

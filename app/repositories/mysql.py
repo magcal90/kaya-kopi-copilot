@@ -360,11 +360,24 @@ class MySQLRepository:
                         },
                     }
                 )
+            measured = sorted(
+                (row for row in results if row["coverage_status"] == "MEASURED"),
+                key=lambda row: Decimal(row["total_wastage_kg"]),
+                reverse=True,
+            )
+            all_comparable = len(measured) == len(results)
             return {
+                "status": "COMPLETE" if all_comparable else "PARTIAL",
                 "analysis": analysis,
                 "period": {"start": start_date.isoformat(), "end": end_date.isoformat()},
                 "definition": "Total weight of all food discarded at the outlet; not product-specific.",
                 "results": results,
+                "comparison_scope": "ALL_REQUESTED_OUTLETS" if all_comparable else "MEASURED_OUTLETS_ONLY",
+                "all_outlets_comparable": all_comparable,
+                "measured_outlet_count": len(measured),
+                "unmeasured_outlet_count": len(results) - len(measured),
+                "highest_measured_wastage": measured[0] if measured else None,
+                "ranked_measured_results": measured,
                 "limitation": "Only BDK-01 and WDL-01 record wastage; unrecorded outlets cannot be ranked.",
             }
         if analysis == "staffing":
@@ -434,10 +447,24 @@ class MySQLRepository:
                         "coverage": sales["coverage"],
                     }
                 )
+            comparable_outlets = sorted(
+                (row for row in results if row["productivity_comparable"]),
+                key=lambda row: Decimal(row["gross_takings_per_paid_hour_sgd"]),
+            )
+            non_comparable_outlets = [
+                row for row in results if not row["productivity_comparable"]
+            ]
             return {
                 "analysis": analysis,
                 "period": {"start": start_date.isoformat(), "end": end_date.isoformat()},
                 "results": results,
+                "classification": "NO_APPROVED_OVERSTAFFING_THRESHOLD",
+                "comparable_outlets": comparable_outlets,
+                "non_comparable_outlets": non_comparable_outlets,
+                "lowest_comparable_productivity": (
+                    comparable_outlets[0] if comparable_outlets else None
+                ),
+                "conclusion": "No outlet can be classified as overstaffed without an approved threshold. Partial-POS outlets are excluded from productivity comparisons.",
                 "method": "Expands each weekly shift pattern only over matching weekdays in its roster month. TBC rates use the client-approved S$13/hour default.",
                 "privacy": "Individual staff names are not returned.",
             }
@@ -451,7 +478,9 @@ class MySQLRepository:
             summary = result["summary"]
             results.append(
                 {
+                    "requested_outlet_code": requested_code.strip().upper(),
                     "outlet_code": result["outlet_code"],
+                    "alias_resolution": result["alias_resolution"],
                     "authority": result["authority"],
                     "gross_takings_sgd": summary.get(
                         "gross_takings_sgd", summary["total_sales_sgd"]
@@ -592,7 +621,35 @@ class MySQLRepository:
                     WHERE {' AND '.join(where)} ORDER BY sp.purchase_date, r.supplier_purchase_id""",
                 params,
             )
-            return {"analysis": analysis, "results": rows, "interpretation": "A difference identifies a mismatch; it does not establish its cause. Scanned invoice lines are authoritative where present.", "citation": {"source_locator": "table=purchase_invoice_reconciliation"}}
+            for row in rows:
+                identity_match = row["reconciliation_status"] == "MATCHED"
+                difference = row["subtotal_difference_sgd"]
+                amount_match = identity_match and difference is not None and Decimal(difference) == 0
+                row.update(
+                    {
+                        "identity_match": identity_match,
+                        "amount_match": amount_match,
+                        "gst_responsible": False,
+                        "gst_explanation": (
+                            "GST cannot explain this difference because both compared values are pre-GST subtotals."
+                            if identity_match and not amount_match
+                            else "GST is not part of this subtotal comparison."
+                        ),
+                        "cause": (
+                            "NO_SCAN"
+                            if not identity_match
+                            else "AMOUNTS_AGREE" if amount_match else "UNDETERMINED"
+                        ),
+                    }
+                )
+            invoice_evidence = self.get_invoice(invoice_number) if invoice_number else None
+            return {
+                "analysis": analysis,
+                "results": rows,
+                "invoice_evidence": invoice_evidence,
+                "interpretation": "MATCHED identifies the linked purchase and scan; it does not mean their amounts agree. A subtotal difference does not establish its cause.",
+                "citation": {"source_locator": "table=purchase_invoice_reconciliation"},
+            }
         if analysis == "spend":
             if start_date and end_date:
                 _validate_period(start_date, end_date)
@@ -616,14 +673,15 @@ class MySQLRepository:
             if group_by not in groups:
                 raise ValueError(f"unsupported supplier grouping: {group_by}")
             select_expr, group_expr = groups[group_by]
-            where, params = ["c.canonical_total IS NOT NULL"], []
+            filters, params = [], []
             if supplier_query:
-                where.append("(s.supplier_code=%s OR c.supplier_name LIKE %s)")
+                filters.append("(s.supplier_code=%s OR c.supplier_name LIKE %s)")
                 params.extend([supplier_query.upper(), f"%{supplier_query}%"])
             if start_date:
-                where.append("c.invoice_date >= %s"); params.append(start_date)
+                filters.append("c.invoice_date >= %s"); params.append(start_date)
             if end_date:
-                where.append("c.invoice_date <= %s"); params.append(end_date)
+                filters.append("c.invoice_date <= %s"); params.append(end_date)
+            where = ["c.canonical_total IS NOT NULL", *filters]
             rows = self._query(
                 CANONICAL_INVOICE_COST_CTE + f"""
                 SELECT {select_expr}, COUNT(*) AS invoice_count,
@@ -634,8 +692,30 @@ class MySQLRepository:
                 FROM canonical_invoice_cost c JOIN supplier s ON UPPER(s.canonical_name)=UPPER(c.supplier_name)
                 WHERE {' AND '.join(where)} GROUP BY {group_expr} ORDER BY {group_expr}""", params,
             )
-            unusable = self._query(CANONICAL_INVOICE_COST_CTE + "SELECT COUNT(*) AS count FROM canonical_invoice_cost WHERE canonical_total IS NULL")[0]["count"]
-            return {"analysis": analysis, "group_by": group_by, "results": rows, "authority": "SCANNED_INVOICE_CANONICAL_COST", "excluded_review_required_invoices": unusable, "citation": {"source_locator": "tables=supplier_invoice,supplier_invoice_item"}}
+            excluded_where = ["c.canonical_total IS NULL", *filters]
+            excluded = self._query(
+                CANONICAL_INVOICE_COST_CTE + f"""
+                SELECT c.invoice_number, c.supplier_name, c.invoice_date,
+                       c.cost_basis AS reason, d.source_uri
+                FROM canonical_invoice_cost c
+                JOIN supplier s ON UPPER(s.canonical_name)=UPPER(c.supplier_name)
+                JOIN supplier_invoice i ON i.supplier_invoice_id=c.supplier_invoice_id
+                JOIN source_document d ON d.source_document_id=i.source_document_id
+                WHERE {' AND '.join(excluded_where)}
+                ORDER BY c.invoice_date, c.invoice_number""",
+                params,
+            )
+            return {
+                "analysis": analysis,
+                "group_by": group_by,
+                "results": rows,
+                "authority": "SCANNED_INVOICE_CANONICAL_COST",
+                "included_invoice_count": sum(int(row["invoice_count"]) for row in rows),
+                "excluded_invoice_count": len(excluded),
+                "excluded_invoices": excluded,
+                "excluded_review_required_invoices": len(excluded),
+                "citation": {"source_locator": "tables=supplier_invoice,supplier_invoice_item"},
+            }
         if analysis == "price_change":
             where, params = ["li.line_total_valid=TRUE", "li.extraction_status='OK'"], []
             if supplier_query:
@@ -644,19 +724,79 @@ class MySQLRepository:
             if start_date: where.append("i.invoice_date >= %s"); params.append(start_date)
             if end_date: where.append("i.invoice_date <= %s"); params.append(end_date)
             rows = self._query(
-                f"""SELECT s.supplier_code, i.supplier_name, li.description, i.invoice_date, li.unit_price
+                f"""SELECT s.supplier_code, i.supplier_name, li.description,
+                           i.invoice_number, i.invoice_date, li.unit_price,
+                           d.source_uri, li.line_number
                     FROM supplier_invoice_item li JOIN supplier_invoice i USING(supplier_invoice_id)
                     JOIN supplier s ON UPPER(s.canonical_name)=UPPER(i.supplier_name)
+                    JOIN source_document d ON d.source_document_id=i.source_document_id
                     WHERE {' AND '.join(where)} ORDER BY s.supplier_code, li.description, i.invoice_date, i.supplier_invoice_id""", params,
             )
-            grouped: dict[tuple[str, str], list[dict[str, Any]]] = {}
-            for row in rows: grouped.setdefault((row["supplier_code"], row["description"]), []).append(row)
-            results = []
-            for (code, description), observations in grouped.items():
+            grouped: dict[tuple[str, str, str], list[dict[str, Any]]] = {}
+            for row in rows:
+                grouped.setdefault(
+                    (row["supplier_code"], row["supplier_name"], row["description"]), []
+                ).append(row)
+            comparable = []
+            insufficient = []
+            for (code, supplier_name, description), observations in grouped.items():
                 first, last = observations[0], observations[-1]
+                if len(observations) < 2 or first["invoice_date"] == last["invoice_date"]:
+                    insufficient.append(
+                        {
+                            "supplier_code": code,
+                            "supplier_name": supplier_name,
+                            "description": description,
+                            "observations": len(observations),
+                            "reason": "NEEDS_OBSERVATIONS_ON_DIFFERENT_DATES",
+                        }
+                    )
+                    continue
                 first_price, last_price = Decimal(first["unit_price"]), Decimal(last["unit_price"])
-                results.append({"supplier_code": code, "description": description, "first_date": first["invoice_date"], "first_unit_price_sgd": first_price, "latest_date": last["invoice_date"], "latest_unit_price_sgd": last_price, "absolute_change_sgd": last_price-first_price, "percent_change": ((last_price-first_price)/first_price*100 if first_price else None), "observations": len(observations)})
-            return {"analysis": analysis, "results": results, "authority": "VALIDATED_SCANNED_INVOICE_LINES", "citation": {"source_locator": "table=supplier_invoice_item"}}
+                percent_change = (
+                    ((last_price - first_price) / first_price * 100).quantize(
+                        Decimal("0.01"), rounding=ROUND_HALF_UP
+                    )
+                    if first_price else None
+                )
+                comparable.append(
+                    {
+                        "supplier_code": code,
+                        "supplier_name": supplier_name,
+                        "description": description,
+                        "first_date": first["invoice_date"],
+                        "first_unit_price_sgd": f"{first_price:.4f}",
+                        "latest_date": last["invoice_date"],
+                        "latest_unit_price_sgd": f"{last_price:.4f}",
+                        "absolute_change_sgd": f"{last_price - first_price:.4f}",
+                        "percent_change": f"{percent_change:.2f}" if percent_change is not None else None,
+                        "observations": len(observations),
+                        "first_evidence": {
+                            "invoice_number": first["invoice_number"],
+                            "citation": f"{first['source_uri']}#invoice={first['invoice_number']};line={first['line_number']}",
+                        },
+                        "latest_evidence": {
+                            "invoice_number": last["invoice_number"],
+                            "citation": f"{last['source_uri']}#invoice={last['invoice_number']};line={last['line_number']}",
+                        },
+                    }
+                )
+            comparable.sort(
+                key=lambda row: Decimal(row["percent_change"]) if row["percent_change"] is not None else Decimal("-Infinity"),
+                reverse=True,
+            )
+            return {
+                "status": "PARTIAL" if insufficient else "COMPLETE",
+                "analysis": analysis,
+                "results": comparable,
+                "comparable_series_count": len(comparable),
+                "insufficient_series_count": len(insufficient),
+                "insufficient_series": insufficient,
+                "largest_increase": comparable[0] if comparable else None,
+                "comparison_basis": "First versus latest validated unit price for the same supplier and exact item description on different invoice dates; ranked by percentage change.",
+                "authority": "VALIDATED_SCANNED_INVOICE_LINES",
+                "citation": {"source_locator": "table=supplier_invoice_item"},
+            }
         raise ValueError(f"unsupported supplier analysis: {analysis}")
 
     def get_invoice(self, invoice_number: str) -> dict[str, Any]:

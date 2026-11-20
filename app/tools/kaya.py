@@ -55,7 +55,11 @@ class QualityIssuesInput(BaseModel):
 
 class AnalyzeOutletsInput(BaseModel):
     analysis: Literal["performance", "wastage", "staffing"]
-    outlet_codes: list[str] = Field(default_factory=list, max_length=12)
+    outlet_codes: list[str] = Field(
+        default_factory=list,
+        max_length=12,
+        description="Canonical, legacy, or re-registered outlet codes; verified aliases are resolved automatically. Leave empty for all outlets.",
+    )
     start_date: date
     end_date: date
 
@@ -120,7 +124,7 @@ def analyze_outlets(
     end_date: date,
     outlet_codes: list[str] | None = None,
 ) -> dict[str, Any]:
-    """Analyze authoritative outlet performance, measured wastage, or roster-based staffing."""
+    """Analyze outlet performance, wastage, or staffing with source-authority and comparability rules. Use performance for gross takings/receipts, wastage for measured-only ranking, and staffing for paid-hours productivity. Verified outlet aliases are accepted."""
     return _call("analyze_outlets", analysis, outlet_codes or [], start_date, end_date)
 
 
@@ -139,7 +143,7 @@ def analyze_suppliers(
     start_date: date | None = None, end_date: date | None = None,
     group_by: str = "supplier",
 ) -> dict[str, Any]:
-    """Analyze authoritative scanned invoices, supplier spend, prices, and reconciliation."""
+    """Analyze scanned invoices and supplier evidence. Use spend with group_by=supplier_month for monthly spend; price_change for first/latest comparable invoice-line prices; reconciliation for purchase/scan identity and amount differences; invoice for one invoice."""
     return _call("analyze_suppliers", analysis, supplier_query, invoice_number, start_date, end_date, group_by)
 
 

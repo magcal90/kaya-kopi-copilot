@@ -42,6 +42,16 @@ docker compose down             # stop services; preserve database volumes
 ./scripts/reload_data.sh         # explicitly purge and rebuild business data
 ```
 
+The deterministic test command does not call the LLM. To manually review the non-deterministic
+answers against the project acceptance questions after loading the database, run:
+
+```bash
+docker compose --profile test run --rm test python scripts/run_llm_acceptance.py
+```
+
+This uses the configured OpenAI key and prints each answer beside its expected evidence checklist;
+it is intentionally not part of the automated test suite.
+
 See [ingestion/README.md](ingestion/README.md) for individual parser, schema and loader commands.
 
 ## Rules of engagement

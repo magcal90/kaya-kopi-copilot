@@ -1,7 +1,6 @@
 services:
   mysql:
     image: mysql:8
-    container_name: capstone-mysql
     environment:
       MYSQL_ROOT_PASSWORD: ${KAYA_DB_ROOT_PASSWORD}
     ports:
@@ -66,6 +65,8 @@ services:
     working_dir: /workspace
     volumes:
       - .:/workspace:ro
+    env_file:
+      - .env
     environment:
       KAYA_DB_HOST: mysql
       KAYA_DB_PORT: ${KAYA_DB_PORT:-3306}
