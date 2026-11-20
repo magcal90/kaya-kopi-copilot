@@ -2,12 +2,12 @@
 
 Tick items as your team completes them; the instructor reviews this file at each due date.
 
-## Checkpoint 1 — due Thu 19 Nov 2026, 09:00 (reviewed at Consult 1, 10:00 on Zoom)
+## Checkpoint 1 — due Fri 20 Nov 2026, 17:00 (repository review; no meeting)
 - [ ] Data audit complete: every file in `data/` opened, row/page counts recorded
-- [ ] ER diagram of the CLEANED schema (Mermaid, in `docs/`)
+- [ ] ER diagram of the CLEANED schema (Mermaid; stored at repository root per team file-location rule)
 - [ ] Trap list: every data-quality problem found so far, with evidence
-- [ ] Package checked against the brief: anything the brief mentions that is NOT in the package has been raised with the client by email, and the answer recorded in `docs/client_qa.md`
-- [ ] Architecture proposal (Mermaid, in `docs/`)
+- [ ] Package checked against the brief: anything the brief mentions that is NOT in the package has been raised with the client by email, and the answer recorded in `CLIENT_QA.md`
+- [ ] Architecture proposal (Mermaid; stored at repository root per team file-location rule)
 - [ ] Everyone has committed at least once
 
 ## Checkpoint 2 — due Mon 23 Nov 2026, 09:00 (reviewed at Consult 3, 13:00 on Zoom)

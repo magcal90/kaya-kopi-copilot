@@ -1,0 +1,4 @@
+# OCR and invoice parsing
+Pillow>=10.0,<13
+paddleocr>=3.3,<4
+paddlepaddle>=3.2,<4

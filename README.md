@@ -6,15 +6,43 @@ customer on **Fri 27 Nov 2026**.
 
 ## Quick start
 
+Prerequisite: Docker Desktop, or Docker Engine with Docker Compose v2.
+
 ```bash
-git clone <this repo>
+git clone <repository-url>
 cd team1_kaya_kopi
-python3 -m venv .venv && source .venv/bin/activate
-cp .env.example .env          # paste in your team API key (handed out at the briefing)
-# download your team zip from NTULearn and unzip into data/  (see data/README.md)
-docker compose up -d          # local MySQL — or use MySQL Workbench directly
-docker compose exec -T mysql mysql -uroot -pcapstone < data/sql/<dump>.sql
+cp .env.example .env
+# Configure the passwords, ports and OPENAI_API_KEY in .env.
+# Copy the client package contents into data/; see data/README.md.
+./scripts/bootstrap.sh
+./scripts/reload_data.sh
+./scripts/test.sh
+./scripts/start.sh
 ```
+
+Open <http://localhost:8501> (or the configured `KAYA_STREAMLIT_HOST_PORT`). Docker images provide
+the isolated Python environments; no host virtual environment or manual `pip install` is required.
+
+The commands have deliberately separate responsibilities:
+
+- `bootstrap.sh` validates the environment and builds the images;
+- `reload_data.sh` explicitly purges and rebuilds the database from the private inputs;
+- `test.sh` runs the parser tests and read-only database health/functional checks; and
+- `start.sh` starts MySQL and Streamlit without rerunning ingestion or tests.
+
+The first run is slower because Docker builds the application images and PaddleOCR downloads its
+English model. Parsed files remain under the git-ignored `runtime/` directory, the MySQL data
+uses a Docker volume, and chat checkpoints use a separate Docker volume.
+
+Useful commands:
+
+```bash
+docker compose logs -f copilot  # application logs
+docker compose down             # stop services; preserve database volumes
+./scripts/reload_data.sh         # explicitly purge and rebuild business data
+```
+
+See [ingestion/README.md](ingestion/README.md) for individual parser, schema and loader commands.
 
 ## Rules of engagement
 
@@ -22,19 +50,19 @@ docker compose exec -T mysql mysql -uroot -pcapstone < data/sql/<dump>.sql
 2. **Every member contributes.** Team-process marks are graded per person from commit history — every member commits real work under their own GitHub account (set `git config user.email` to the e-mail on your GitHub profile, or your commits are credited to nobody). Pair-programming is fine; say so in commit messages (`Co-authored-by:`).
 3. **Budget.** Your API key has a hard budget. Watch your spend; a burned key is not replaced.
 4. **Cite everything.** Answers your app gives must say where the fact came from. See [HARNESS_CHECKLIST.md](HARNESS_CHECKLIST.md) — it is the grading rubric in checklist form.
-5. **Ask the client, by email.** The client is reachable only by email to the course director (subject `Client question — Team N`), replies within two working days and does not take calls. If the brief mentions something that is not in the package, ask — do not guess and do not quietly work around it. Keep every answer in `docs/client_qa.md`.
+5. **Ask the client, by email.** The client is reachable only by email to the course director (subject `Client question — Team N`), replies within two working days and does not take calls. If the brief mentions something that is not in the package, ask — do not guess and do not quietly work around it. Keep every answer in [`CLIENT_QA.md`](CLIENT_QA.md).
 
 ## Deliverables
 
 - Working application (live demo; a judging panel plays your customer and asks unscripted questions)
-- Architecture documentation with **at least two Mermaid diagrams** (in `docs/`)
+- Architecture documentation with **at least two Mermaid diagrams** at the repository root
 - Data quality report: every trap you found and how you handled it
 - 5-minute pitch
 - Honest post-mortem (what you'd do differently)
 
 ## Timeline
 
-Briefing Mon 16 Nov (Zoom) · Checkpoint 1 Thu 19 Nov · Checkpoint 2 Mon 23 Nov · Consults Thu 19, Fri 20, Mon 23, Tue 24 Nov (Zoom) · Final sprint Thu 26 Nov · **Demo Fri 27 Nov 09:00–13:00, SR902** (slot order announced Tue 24 Nov). Details: [CHECKPOINTS.md](CHECKPOINTS.md).
+Briefing Mon 16 Nov (Zoom) · **Checkpoint 1 Fri 20 Nov, 17:00 (repo review; no meeting)** · Checkpoint 2 Mon 23 Nov · Consults Mon 23 and Tue 24 Nov (Zoom) · Final sprint Thu 26 Nov · **Demo Fri 27 Nov 09:00–13:00, SR902** (slot order announced Tue 24 Nov). Details: [CHECKPOINTS.md](CHECKPOINTS.md).
 
 ## Real commit
 - Chandra
