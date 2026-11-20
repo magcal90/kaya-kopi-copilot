@@ -1,15 +1,15 @@
-# Kaya Kopi Holdings Pte Ltd — AI Engineering Capstone (team1_kaya_kopi)
+# Kaya Kopi Project Prototype
 
 Your team is the forward-deployed engineering unit for **Kaya Kopi Holdings Pte Ltd**. Your job: build the
 F&B ops copilot described in [CLIENT_BRIEF.md](CLIENT_BRIEF.md) and survive a live demo with the
-customer on **Fri 27 Nov 2026**.
+customer.
 
 ## Quick start
 
 Prerequisite: Docker Desktop, or Docker Engine with Docker Compose v2.
 
 ```bash
-git clone <repository-url>
+git clone https://github.com/magcal90/kaya-kopi-copilot
 cd team1_kaya_kopi_prototype
 cp .env.example .env
 # Configure the passwords, ports and OPENAI_API_KEY in .env.
