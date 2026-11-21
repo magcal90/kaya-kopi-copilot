@@ -24,7 +24,7 @@ class QueryToolIntegrationTest(unittest.TestCase):
     def test_public_tool_set_is_consolidated(self) -> None:
         self.assertEqual(
             [tool.name for tool in ALL_TOOLS],
-            ["analyze_outlets", "analyze_pos", "analyze_suppliers", "get_data_coverage", "search_documents", "assess_kopi_price_change", "get_data_quality_issues"],
+            ["analyze_outlets_sql", "analyze_pos_sql", "analyze_suppliers_sql", "get_data_coverage_sql", "search_documents_sql", "assess_kopi_price_change_sql", "get_data_quality_issues_sql"],
         )
 
     def test_analyze_pos_product_mix_is_explicitly_partial(self) -> None:
