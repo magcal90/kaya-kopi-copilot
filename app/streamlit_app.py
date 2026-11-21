@@ -7,6 +7,7 @@ import logging
 import sys
 import uuid
 from pathlib import Path
+from typing import Any
 
 # Streamlit may be launched from either the repository root or the app directory. Ensure the
 # repository package root is importable in both cases before importing ``app.*`` modules.
@@ -18,7 +19,7 @@ import streamlit as st
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langgraph.errors import GraphRecursionError
 
-from app.chat_backend import get_chatbot, retrieve_all_threads, stream_chat
+from app.chat_backend import get_chatbot, get_usage_tracker, retrieve_all_threads, stream_chat
 from app.context_policy import ContextBudgetExceeded
 
 
@@ -60,6 +61,51 @@ if "message_history" not in st.session_state:
 if "tool_log" not in st.session_state:
     st.session_state.tool_log = []
 
+
+def _render_usage(panel: Any) -> None:
+    try:
+        summary = get_usage_tracker().budget_status(st.session_state.thread_id)
+    except Exception:
+        logger.exception("Unable to load LLM usage summary")
+        panel.caption("LLM usage summary is temporarily unavailable.")
+        return
+    with panel.container():
+        st.markdown("**LLM usage**")
+        st.metric(
+            f"Estimated spend ({summary['period']})",
+            f"${summary['tracked_spend_usd']:.4f} / ${summary['budget_usd']:.2f}",
+        )
+        st.caption(
+            f"{summary['request_count']} requests · {summary['model_call_count']} model calls · "
+            f"{summary['input_tokens'] + summary['output_tokens']:,} tokens"
+        )
+        st.caption(f"Model: `{summary['model']}`")
+        st.caption("Spend is estimated from this app's recorded usage; it excludes prior/external API use and is not a live credit balance.")
+        if summary["usage_unavailable_call_count"]:
+            st.warning(
+                f"Usage metadata was unavailable for {summary['usage_unavailable_call_count']} "
+                "successful model calls; tracked spend may be understated."
+            )
+        conversation = summary["conversation"]
+        st.caption(
+            f"This conversation: ${conversation['estimated_spend_usd']:.4f} · "
+            f"{conversation['request_count']} requests · "
+            f"{conversation['model_call_count']} model calls"
+        )
+        if summary["alert_level"] == 3:
+            st.error(
+                f"Estimated tracked spend has reached or exceeded the configured "
+                f"USD {summary['budget_usd']:.2f} budget."
+            )
+        elif summary["alert_level"] == 2:
+            st.error(
+                f"Estimated spend reached the USD {summary['warning_usd']:.2f} budget warning threshold."
+            )
+        elif summary["alert_level"] == 1:
+            st.warning(
+                f"Estimated spend reached the USD {summary['alert_usd']:.2f} budget alert threshold."
+            )
+
 st.title("☕ Kaya Kopi Ops Copilot")
 st.caption("Grounded answers from POS, invoices, operational documents, and data-quality records")
 
@@ -90,6 +136,9 @@ with st.sidebar:
         for entry in st.session_state.tool_log:
             st.markdown(f"**{entry['name']}**")
             st.code(entry["result"], language="json")
+
+    usage_panel = st.empty()
+    _render_usage(usage_panel)
 
     st.divider()
     st.caption("Read-only: this assistant cannot modify the database.")
@@ -146,10 +195,28 @@ if prompt:
                     "Copilot request failed",
                     extra={"thread_id": st.session_state.thread_id},
                 )
-                yield (
-                    "I couldn't complete that check. Confirm the database is available and "
-                    f"the LLM configuration is valid. Technical detail: `{type(error).__name__}`."
-                )
+                status_code = getattr(error, "status_code", None)
+                if status_code is None and getattr(error, "response", None) is not None:
+                    status_code = getattr(error.response, "status_code", None)
+                error_code = getattr(error, "code", None)
+                if status_code == 429 and error_code in {
+                    "insufficient_quota", "billing_hard_limit_reached"
+                }:
+                    message = (
+                        "The OpenAI project or billing quota has been reached. Check the "
+                        "project's billing limits and available budget."
+                    )
+                elif status_code == 429:
+                    message = (
+                        "OpenAI is rate-limiting requests. The client retried transient failures; "
+                        "please wait briefly and try again."
+                    )
+                else:
+                    message = (
+                        "I couldn't complete that check. The failure was logged for troubleshooting. "
+                        f"Technical detail: `{type(error).__name__}`."
+                    )
+                yield message
 
         answer = st.write_stream(response_tokens())
         if activity["status"] is not None:
@@ -162,3 +229,4 @@ if prompt:
     if not isinstance(answer, str):
         answer = json.dumps(answer, default=str)
     st.session_state.message_history.append({"role": "assistant", "content": answer})
+    _render_usage(usage_panel)
