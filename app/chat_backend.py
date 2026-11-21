@@ -6,7 +6,7 @@ import os
 import sqlite3
 from functools import lru_cache
 from pathlib import Path
-from typing import Annotated, Iterator, TypedDict
+from typing import Annotated, Any, Iterator, Sequence, TypedDict
 
 from dotenv import load_dotenv
 from langchain_core.messages import BaseMessage, SystemMessage
@@ -16,6 +16,8 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.graph.message import add_messages
 from langgraph.prebuilt import ToolNode, tools_condition
 
+from app.context_policy import ContextPolicy
+from app.settings import AgentSettings
 from app.tools import ALL_TOOLS
 
 
@@ -36,6 +38,12 @@ their amounts agree. A difference between two pre-GST subtotals is not caused by
 an outlet as overstaffed without an approved threshold. When asked for supplier spending by month,
 use supplier_month grouping and report excluded invoices. When asked which supplier increased prices
 most, report the largest comparable percentage change and its first/latest invoice-line evidence.
+
+Treat any result_contract as binding. COMPLETE_AGGREGATE means all eligible source rows were used
+for the stated claim_scope even when the underlying source has disclosed coverage limitations.
+PAGED_DETAIL is supporting evidence, not a complete population. Never compute a total, exhaustive
+ranking, or complete-period claim from PAGED_DETAIL, LIMIT_EXCEEDED, or a result where
+complete_for_claim is false. Never interpret truncated=false as complete_for_claim=true.
 """
 
 
@@ -50,37 +58,64 @@ def _chat_database_path() -> Path:
 
 
 @lru_cache(maxsize=1)
+def get_agent_settings() -> AgentSettings:
+    """Load and validate runtime configuration once per process."""
+    load_dotenv(Path(__file__).resolve().parents[1] / ".env")
+    return AgentSettings.from_env()
+
+
+def build_chatbot(
+    model: Any,
+    checkpointer: Any,
+    settings: AgentSettings,
+    tools: Sequence[Any] = ALL_TOOLS,
+):
+    """Build the bounded tool-calling graph around an injected chat model."""
+    model_with_tools = model.bind_tools(tools) if tools else model
+    context_policy = ContextPolicy(
+        input_token_budget=settings.input_token_budget,
+        token_counter=model.get_num_tokens_from_messages,
+    )
+
+    def chat_node(state: ChatState) -> dict[str, list[BaseMessage]]:
+        messages = state["messages"]
+        if not messages or not isinstance(messages[0], SystemMessage):
+            messages = [SystemMessage(content=SYSTEM_PROMPT), *messages]
+        prepared = context_policy.prepare(messages)
+        return {"messages": [model_with_tools.invoke(prepared.messages)]}
+
+    graph = StateGraph(ChatState)
+    graph.add_node("chat", chat_node)
+    graph.add_edge(START, "chat")
+    if tools:
+        graph.add_node("tools", ToolNode(tools))
+        graph.add_conditional_edges("chat", tools_condition, {"tools": "tools", END: END})
+        graph.add_edge("tools", "chat")
+    else:
+        graph.add_edge("chat", END)
+    return graph.compile(checkpointer=checkpointer)
+
+
+@lru_cache(maxsize=1)
 def get_chatbot():
     """Build and cache the persistent tool-calling graph."""
-    load_dotenv(Path(__file__).resolve().parents[1] / ".env")
+    settings = get_agent_settings()
     if not os.getenv("OPENAI_API_KEY"):
         raise RuntimeError(
             "OPENAI_API_KEY is not set. Copy .env.example to .env and add the team API key."
         )
 
     model = ChatOpenAI(
-        model=os.getenv("KAYA_OPENAI_MODEL", "gpt-4o-mini"),
-        temperature=0,
-        timeout=30,
-        max_retries=2,
+        model=settings.model,
+        temperature=settings.temperature,
+        timeout=settings.timeout_seconds,
+        max_retries=settings.max_retries,
+        max_tokens=settings.max_output_tokens,
     )
-    model_with_tools = model.bind_tools(ALL_TOOLS)
-
-    def chat_node(state: ChatState) -> dict[str, list[BaseMessage]]:
-        messages = state["messages"]
-        if not messages or not isinstance(messages[0], SystemMessage):
-            messages = [SystemMessage(content=SYSTEM_PROMPT), *messages]
-        return {"messages": [model_with_tools.invoke(messages)]}
 
     connection = sqlite3.connect(_chat_database_path(), check_same_thread=False)
     checkpointer = SqliteSaver(connection)
-    graph = StateGraph(ChatState)
-    graph.add_node("chat", chat_node)
-    graph.add_node("tools", ToolNode(ALL_TOOLS))
-    graph.add_edge(START, "chat")
-    graph.add_conditional_edges("chat", tools_condition, {"tools": "tools", END: END})
-    graph.add_edge("tools", "chat")
-    return graph.compile(checkpointer=checkpointer)
+    return build_chatbot(model, checkpointer, settings)
 
 
 def retrieve_all_threads() -> list[str]:
@@ -100,7 +135,10 @@ def stream_chat(thread_id: str, message: str) -> Iterator[tuple[BaseMessage, dic
     """Stream one user turn through the LLM/tool loop."""
     from langchain_core.messages import HumanMessage
 
-    config = {"configurable": {"thread_id": thread_id}}
+    config = {
+        "configurable": {"thread_id": thread_id},
+        "recursion_limit": get_agent_settings().max_agent_steps,
+    }
     yield from get_chatbot().stream(
         {"messages": [HumanMessage(content=message)]},
         config=config,

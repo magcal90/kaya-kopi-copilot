@@ -12,6 +12,8 @@ from langchain_core.tools import tool
 from pydantic import BaseModel, Field
 
 from app.repositories.mysql import MySQLRepository
+from app.settings import AgentSettings
+from app.tool_result_policy import ToolResultPolicy
 
 
 class OutletSalesInput(BaseModel):
@@ -37,6 +39,8 @@ class SupplierTrendInput(BaseModel):
     supplier_name: str = Field(description="Full or partial supplier name")
     start_date: date = Field(description="Inclusive invoice start date in YYYY-MM-DD format")
     end_date: date = Field(description="Inclusive invoice end date in YYYY-MM-DD format")
+    detail_limit: int = Field(default=50, ge=1, le=100)
+    after_invoice_id: int | None = Field(default=None, ge=0)
 
 
 class DocumentSearchInput(BaseModel):
@@ -79,6 +83,21 @@ class AnalyzeSuppliersInput(BaseModel):
     start_date: date | None = None
     end_date: date | None = None
     group_by: Literal["all", "supplier", "month", "supplier_month"] = "supplier"
+    detail_limit: int = Field(
+        default=50,
+        ge=1,
+        le=100,
+        description="Maximum reconciliation detail rows per page",
+    )
+    after_purchase_id: int | None = Field(
+        default=None,
+        ge=0,
+        description="Reconciliation keyset cursor returned by the previous page",
+    )
+    series_cursor: str | None = Field(
+        default=None,
+        description="Opaque cursor returned when paging price-change series",
+    )
 
 
 class DataCoverageInput(BaseModel):
@@ -103,10 +122,16 @@ def _repository() -> MySQLRepository:
     return MySQLRepository()
 
 
+@lru_cache(maxsize=1)
+def _result_policy() -> ToolResultPolicy:
+    settings = AgentSettings.from_env()
+    return ToolResultPolicy(max_result_bytes=settings.tool_max_result_bytes)
+
+
 def _call(method: str, *args: Any, **kwargs: Any) -> dict[str, Any]:
     try:
         result = getattr(_repository(), method)(*args, **kwargs)
-        return {"ok": True, **result}
+        return _result_policy().enforce({"ok": True, **result}, operation=method)
     except ValueError as error:
         return {"ok": False, "error": str(error), "error_type": "validation"}
     except pymysql.MySQLError:
@@ -142,9 +167,14 @@ def analyze_suppliers(
     analysis: str, supplier_query: str | None = None, invoice_number: str | None = None,
     start_date: date | None = None, end_date: date | None = None,
     group_by: str = "supplier",
+    detail_limit: int = 50, after_purchase_id: int | None = None,
+    series_cursor: str | None = None,
 ) -> dict[str, Any]:
     """Analyze scanned invoices and supplier evidence. Use spend with group_by=supplier_month for monthly spend; price_change for first/latest comparable invoice-line prices; reconciliation for purchase/scan identity and amount differences; invoice for one invoice."""
-    return _call("analyze_suppliers", analysis, supplier_query, invoice_number, start_date, end_date, group_by)
+    return _call(
+        "analyze_suppliers", analysis, supplier_query, invoice_number,
+        start_date, end_date, group_by, detail_limit, after_purchase_id, series_cursor,
+    )
 
 
 @tool("get_data_coverage", args_schema=DataCoverageInput)
@@ -193,10 +223,14 @@ def get_invoice(invoice_number: str) -> dict[str, Any]:
 
 @tool("get_supplier_cost_trend", args_schema=SupplierTrendInput)
 def get_supplier_cost_trend(
-    supplier_name: str, start_date: date, end_date: date
+    supplier_name: str, start_date: date, end_date: date,
+    detail_limit: int = 50, after_invoice_id: int | None = None,
 ) -> dict[str, Any]:
     """Get monthly scanned-invoice totals and item unit-price trends for a supplier."""
-    return _call("get_supplier_cost_trend", supplier_name, start_date, end_date)
+    return _call(
+        "get_supplier_cost_trend", supplier_name, start_date, end_date,
+        detail_limit, after_invoice_id,
+    )
 
 
 @tool("search_documents", args_schema=DocumentSearchInput)

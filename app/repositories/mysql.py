@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import os
+import base64
+import json
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from decimal import ROUND_HALF_UP, Decimal
@@ -195,36 +197,58 @@ class MySQLRepository:
             (outlet,),
         )[0]
         if daily_source["available_days"]:
-            daily_rows = self._query(
+            aggregate = self._query(
                 """
-                SELECT d.business_date, d.sales_amount_sgd AS gross_takings_sgd,
-                       d.reported_volume AS receipt_count, d.wastage_kg,
-                       d.validation_status, s.source_uri, d.source_locator
+                SELECT COUNT(*) AS reported_days,
+                       SUM(d.validation_status='OK') AS included_days,
+                       ROUND(COALESCE(SUM(CASE WHEN d.validation_status='OK'
+                           THEN d.sales_amount_sgd ELSE 0 END), 0), 2) AS gross_takings_sgd,
+                       COALESCE(SUM(CASE WHEN d.validation_status='OK'
+                           THEN d.reported_volume ELSE 0 END), 0) AS receipt_count
                 FROM daily_outlet_summary d
                 JOIN outlets o ON o.outlet_id=d.outlet_id
-                JOIN source_document s ON s.source_document_id=d.source_document_id
                 WHERE o.outlet_code=%s
                   AND d.business_date BETWEEN %s AND %s
-                ORDER BY d.business_date
                 """,
                 (outlet, start_date, end_date),
-            )
-            usable_rows = [row for row in daily_rows if row["validation_status"] == "OK"]
-            gross_takings = sum(Decimal(row["gross_takings_sgd"]) for row in usable_rows)
-            receipt_count = sum(int(row["receipt_count"]) for row in usable_rows)
-            present_dates = {date.fromisoformat(row["business_date"]) for row in daily_rows}
+            )[0]
+            if include_daily:
+                daily_rows = self._query(
+                    """
+                    SELECT d.business_date, d.sales_amount_sgd AS gross_takings_sgd,
+                           d.reported_volume AS receipt_count, d.wastage_kg,
+                           d.validation_status, s.source_uri, d.source_locator
+                    FROM daily_outlet_summary d
+                    JOIN outlets o ON o.outlet_id=d.outlet_id
+                    JOIN source_document s ON s.source_document_id=d.source_document_id
+                    WHERE o.outlet_code=%s
+                      AND d.business_date BETWEEN %s AND %s
+                    ORDER BY d.business_date
+                    """,
+                    (outlet, start_date, end_date),
+                )
+                coverage_rows = daily_rows
+            else:
+                daily_rows = []
+                coverage_rows = self._query(
+                    """
+                    SELECT d.business_date, d.validation_status, s.source_uri
+                    FROM daily_outlet_summary d
+                    JOIN outlets o ON o.outlet_id=d.outlet_id
+                    JOIN source_document s ON s.source_document_id=d.source_document_id
+                    WHERE o.outlet_code=%s
+                      AND d.business_date BETWEEN %s AND %s
+                    ORDER BY d.business_date
+                    """,
+                    (outlet, start_date, end_date),
+                )
+            present_dates = {date.fromisoformat(row["business_date"]) for row in coverage_rows}
             requested_dates = {
                 start_date + timedelta(days=offset)
                 for offset in range((end_date - start_date).days + 1)
             }
             missing_dates = sorted(day.isoformat() for day in requested_dates - present_dates)
-            citations = [
-                {
-                    "source_uri": row["source_uri"],
-                    "source_locator": row["source_locator"],
-                }
-                for row in daily_rows
-            ]
+            source_uris = sorted({row["source_uri"] for row in coverage_rows})
             return {
                 "outlet_code": outlet,
                 "alias_resolution": alias_resolution,
@@ -232,12 +256,12 @@ class MySQLRepository:
                 "period": {"start": start_date.isoformat(), "end": end_date.isoformat()},
                 "summary": {
                     "outlet_code": outlet,
-                    "gross_takings_sgd": f"{gross_takings:.2f}",
-                    "total_sales_sgd": f"{gross_takings:.2f}",
-                    "receipt_count": receipt_count,
-                    "transaction_count": receipt_count,
-                    "reported_days": len(daily_rows),
-                    "included_days": len(usable_rows),
+                    "gross_takings_sgd": aggregate["gross_takings_sgd"],
+                    "total_sales_sgd": aggregate["gross_takings_sgd"],
+                    "receipt_count": int(aggregate["receipt_count"]),
+                    "transaction_count": int(aggregate["receipt_count"]),
+                    "reported_days": int(aggregate["reported_days"]),
+                    "included_days": int(aggregate["included_days"]),
                 },
                 "daily": [
                     {
@@ -261,7 +285,15 @@ class MySQLRepository:
                 "method": "Uses manager-entered daily Z-report summaries as the authoritative source for gross takings and receipts; missing dates are excluded and reported as gaps.",
                 "citation": {
                     "source_locator": "table=daily_outlet_summary",
-                    "records": citations,
+                    "source_uris": source_uris,
+                    "record_count": int(aggregate["reported_days"]),
+                    "period": {"start": start_date.isoformat(), "end": end_date.isoformat()},
+                },
+                "result_contract": {
+                    "kind": "COMPLETE_AGGREGATE",
+                    "complete_for_claim": True,
+                    "truncated": False,
+                    "claim_scope": "REPORTED_SOURCE_ROWS",
                 },
             }
 
@@ -494,6 +526,12 @@ class MySQLRepository:
             "analysis": analysis,
             "period": {"start": start_date.isoformat(), "end": end_date.isoformat()},
             "results": results,
+            "result_contract": {
+                "kind": "COMPLETE_AGGREGATE",
+                "complete_for_claim": True,
+                "truncated": False,
+                "claim_scope": "REPORTED_SOURCE_ROWS",
+            },
         }
 
     def compare_outlets(
@@ -586,12 +624,20 @@ class MySQLRepository:
             "period": {"start": start_date.isoformat(), "end": end_date.isoformat()},
             "results": rows,
             "coverage_warning": "The POS export is incomplete. Results describe observed records only and must not be presented as complete revenue or volume.",
+            "result_contract": {
+                "kind": "COMPLETE_AGGREGATE",
+                "complete_for_claim": True,
+                "truncated": False,
+                "claim_scope": "OBSERVED_POS_ROWS",
+            },
             "citation": {"source_uri": "data/sql/kayakopi_pos.sql", "source_locator": "tables=pos_transactions,menu_items"},
         }
 
     def analyze_suppliers(
         self, analysis: str, supplier_query: str | None, invoice_number: str | None,
         start_date: date | None, end_date: date | None, group_by: str,
+        detail_limit: int = 50, after_purchase_id: int | None = None,
+        series_cursor: str | None = None,
     ) -> dict[str, Any]:
         if analysis == "invoice":
             if not invoice_number:
@@ -609,6 +655,9 @@ class MySQLRepository:
             if supplier_query:
                 where.append("(sp.supplier_code=%s OR sp.supplier_name LIKE %s)")
                 params.extend([supplier_query.upper(), f"%{supplier_query}%"])
+            if after_purchase_id is not None:
+                where.append("r.supplier_purchase_id > %s")
+                params.append(after_purchase_id)
             rows = self._query(
                 f"""SELECT r.supplier_purchase_id,
                            COALESCE(i.invoice_number, sp.invoice_no) AS invoice_number,
@@ -618,9 +667,13 @@ class MySQLRepository:
                     FROM purchase_invoice_reconciliation r
                     JOIN supplier_purchases sp ON sp.purchase_id=r.supplier_purchase_id
                     LEFT JOIN supplier_invoice i ON i.supplier_invoice_id=r.supplier_invoice_id
-                    WHERE {' AND '.join(where)} ORDER BY sp.purchase_date, r.supplier_purchase_id""",
-                params,
+                    WHERE {' AND '.join(where)}
+                    ORDER BY r.supplier_purchase_id
+                    LIMIT %s""",
+                [*params, detail_limit + 1],
             )
+            has_more = len(rows) > detail_limit
+            rows = rows[:detail_limit]
             for row in rows:
                 identity_match = row["reconciliation_status"] == "MATCHED"
                 difference = row["subtotal_difference_sgd"]
@@ -648,6 +701,14 @@ class MySQLRepository:
                 "results": rows,
                 "invoice_evidence": invoice_evidence,
                 "interpretation": "MATCHED identifies the linked purchase and scan; it does not mean their amounts agree. A subtotal difference does not establish its cause.",
+                "result_contract": {
+                    "kind": "PAGED_DETAIL",
+                    "complete_for_claim": after_purchase_id is None and not has_more,
+                    "truncated": False,
+                    "returned_rows": len(rows),
+                    "has_more": has_more,
+                    "next_cursor": rows[-1]["supplier_purchase_id"] if has_more and rows else None,
+                },
                 "citation": {"source_locator": "table=purchase_invoice_reconciliation"},
             }
         if analysis == "spend":
@@ -714,6 +775,12 @@ class MySQLRepository:
                 "excluded_invoice_count": len(excluded),
                 "excluded_invoices": excluded,
                 "excluded_review_required_invoices": len(excluded),
+                "result_contract": {
+                    "kind": "COMPLETE_AGGREGATE",
+                    "complete_for_claim": True,
+                    "truncated": False,
+                    "claim_scope": "VALIDATED_SCANNED_INVOICES",
+                },
                 "citation": {"source_locator": "tables=supplier_invoice,supplier_invoice_item"},
             }
         if analysis == "price_change":
@@ -723,78 +790,137 @@ class MySQLRepository:
                 params.extend([supplier_query.upper(), f"%{supplier_query}%"])
             if start_date: where.append("i.invoice_date >= %s"); params.append(start_date)
             if end_date: where.append("i.invoice_date <= %s"); params.append(end_date)
-            rows = self._query(
-                f"""SELECT s.supplier_code, i.supplier_name, li.description,
-                           i.invoice_number, i.invoice_date, li.unit_price,
-                           d.source_uri, li.line_number
-                    FROM supplier_invoice_item li JOIN supplier_invoice i USING(supplier_invoice_id)
-                    JOIN supplier s ON UPPER(s.canonical_name)=UPPER(i.supplier_name)
-                    JOIN source_document d ON d.source_document_id=i.source_document_id
-                    WHERE {' AND '.join(where)} ORDER BY s.supplier_code, li.description, i.invoice_date, i.supplier_invoice_id""", params,
-            )
-            grouped: dict[tuple[str, str, str], list[dict[str, Any]]] = {}
-            for row in rows:
-                grouped.setdefault(
-                    (row["supplier_code"], row["supplier_name"], row["description"]), []
-                ).append(row)
-            comparable = []
-            insufficient = []
-            for (code, supplier_name, description), observations in grouped.items():
-                first, last = observations[0], observations[-1]
-                if len(observations) < 2 or first["invoice_date"] == last["invoice_date"]:
-                    insufficient.append(
-                        {
-                            "supplier_code": code,
-                            "supplier_name": supplier_name,
-                            "description": description,
-                            "observations": len(observations),
-                            "reason": "NEEDS_OBSERVATIONS_ON_DIFFERENT_DATES",
-                        }
+            cursor_values: tuple[Decimal, str, str] | None = None
+            if series_cursor:
+                try:
+                    raw_cursor = base64.urlsafe_b64decode(series_cursor.encode()).decode()
+                    cursor_data = json.loads(raw_cursor)
+                    cursor_values = (
+                        Decimal(cursor_data["percent_change"]),
+                        str(cursor_data["supplier_code"]),
+                        str(cursor_data["description"]),
                     )
-                    continue
-                first_price, last_price = Decimal(first["unit_price"]), Decimal(last["unit_price"])
-                percent_change = (
-                    ((last_price - first_price) / first_price * 100).quantize(
-                        Decimal("0.01"), rounding=ROUND_HALF_UP
+                except (ValueError, KeyError, TypeError, json.JSONDecodeError) as error:
+                    raise ValueError("invalid price-change series cursor") from error
+            ranked = self._query(
+                f"""WITH valid_lines AS (
+                        SELECT s.supplier_code, i.supplier_name, li.description,
+                               i.invoice_number, i.invoice_date, li.unit_price,
+                               d.source_uri, li.line_number, i.supplier_invoice_id,
+                               ROW_NUMBER() OVER (
+                                   PARTITION BY s.supplier_code, li.description
+                                   ORDER BY i.invoice_date, i.supplier_invoice_id, li.line_number
+                               ) AS first_rank,
+                               ROW_NUMBER() OVER (
+                                   PARTITION BY s.supplier_code, li.description
+                                   ORDER BY i.invoice_date DESC, i.supplier_invoice_id DESC, li.line_number DESC
+                               ) AS latest_rank,
+                               COUNT(*) OVER (
+                                   PARTITION BY s.supplier_code, li.description
+                               ) AS observations
+                        FROM supplier_invoice_item li
+                        JOIN supplier_invoice i USING(supplier_invoice_id)
+                        JOIN supplier s ON UPPER(s.canonical_name)=UPPER(i.supplier_name)
+                        JOIN source_document d ON d.source_document_id=i.source_document_id
+                        WHERE {' AND '.join(where)}
+                    ), series AS (
+                        SELECT supplier_code, MAX(supplier_name) AS supplier_name,
+                               description, MAX(observations) AS observations,
+                               MAX(CASE WHEN first_rank=1 THEN invoice_number END) AS first_invoice,
+                               MAX(CASE WHEN first_rank=1 THEN invoice_date END) AS first_date,
+                               MAX(CASE WHEN first_rank=1 THEN unit_price END) AS first_price,
+                               MAX(CASE WHEN first_rank=1 THEN source_uri END) AS first_uri,
+                               MAX(CASE WHEN first_rank=1 THEN line_number END) AS first_line,
+                               MAX(CASE WHEN latest_rank=1 THEN invoice_number END) AS latest_invoice,
+                               MAX(CASE WHEN latest_rank=1 THEN invoice_date END) AS latest_date,
+                               MAX(CASE WHEN latest_rank=1 THEN unit_price END) AS latest_price,
+                               MAX(CASE WHEN latest_rank=1 THEN source_uri END) AS latest_uri,
+                               MAX(CASE WHEN latest_rank=1 THEN line_number END) AS latest_line
+                        FROM valid_lines
+                        GROUP BY supplier_code, description
+                    ), scored AS (
+                        SELECT *, ROUND((latest_price-first_price)/NULLIF(first_price,0)*100, 2) AS percent_change
+                        FROM series
                     )
-                    if first_price else None
-                )
-                comparable.append(
-                    {
-                        "supplier_code": code,
-                        "supplier_name": supplier_name,
-                        "description": description,
-                        "first_date": first["invoice_date"],
-                        "first_unit_price_sgd": f"{first_price:.4f}",
-                        "latest_date": last["invoice_date"],
-                        "latest_unit_price_sgd": f"{last_price:.4f}",
-                        "absolute_change_sgd": f"{last_price - first_price:.4f}",
-                        "percent_change": f"{percent_change:.2f}" if percent_change is not None else None,
-                        "observations": len(observations),
-                        "first_evidence": {
-                            "invoice_number": first["invoice_number"],
-                            "citation": f"{first['source_uri']}#invoice={first['invoice_number']};line={first['line_number']}",
-                        },
-                        "latest_evidence": {
-                            "invoice_number": last["invoice_number"],
-                            "citation": f"{last['source_uri']}#invoice={last['invoice_number']};line={last['line_number']}",
-                        },
-                    }
-                )
-            comparable.sort(
-                key=lambda row: Decimal(row["percent_change"]) if row["percent_change"] is not None else Decimal("-Infinity"),
-                reverse=True,
+                    SELECT *, CONCAT(supplier_code, ':', description) AS series_key
+                    FROM scored
+                    WHERE observations >= 2 AND first_date < latest_date AND first_price <> 0
+                    {"AND (percent_change < %s OR (percent_change = %s AND (supplier_code > %s OR (supplier_code = %s AND description > %s))))" if cursor_values else ""}
+                    ORDER BY percent_change DESC, supplier_code, description
+                    LIMIT %s""",
+                [*params, *([cursor_values[0], cursor_values[0], cursor_values[1], cursor_values[1], cursor_values[2]] if cursor_values else []), detail_limit + 1],
             )
+            has_more = len(ranked) > detail_limit
+            ranked = ranked[:detail_limit]
+            results = []
+            for row in ranked:
+                first_price, latest_price = Decimal(row["first_price"]), Decimal(row["latest_price"])
+                percent = row["percent_change"]
+                results.append({
+                    "series_key": row["series_key"],
+                    "supplier_code": row["supplier_code"],
+                    "supplier_name": row["supplier_name"],
+                    "description": row["description"],
+                    "first_date": row["first_date"],
+                    "first_unit_price_sgd": f"{first_price:.4f}",
+                    "latest_date": row["latest_date"],
+                    "latest_unit_price_sgd": f"{latest_price:.4f}",
+                    "absolute_change_sgd": f"{latest_price-first_price:.4f}",
+                    "percent_change": f"{Decimal(percent):.2f}" if percent is not None else None,
+                    "observations": int(row["observations"]),
+                    "first_evidence": {"invoice_number": row["first_invoice"], "citation": f"{row['first_uri']}#invoice={row['first_invoice']};line={row['first_line']}"},
+                    "latest_evidence": {"invoice_number": row["latest_invoice"], "citation": f"{row['latest_uri']}#invoice={row['latest_invoice']};line={row['latest_line']}"},
+                })
+            next_cursor = None
+            if has_more and ranked:
+                last = ranked[-1]
+                next_cursor = base64.urlsafe_b64encode(json.dumps({
+                    "percent_change": str(last["percent_change"]),
+                    "supplier_code": last["supplier_code"],
+                    "description": last["description"],
+                }, separators=(",", ":")).encode()).decode()
+            series_counts = self._query(
+                f"""SELECT COUNT(*) AS total_count,
+                           SUM(CASE WHEN observation_count >= 2 AND first_date < latest_date AND first_price <> 0 THEN 1 ELSE 0 END) AS comparable_count
+                    FROM (SELECT ranked_lines.supplier_code, ranked_lines.description,
+                                 COUNT(*) AS observation_count,
+                                 MIN(ranked_lines.invoice_date) AS first_date,
+                                 MAX(ranked_lines.invoice_date) AS latest_date,
+                                 MAX(CASE WHEN ranked_lines.first_rank=1 THEN ranked_lines.unit_price END) AS first_price
+                          FROM (
+                              SELECT li.description, li.unit_price, i.invoice_date,
+                                     ROW_NUMBER() OVER (PARTITION BY s.supplier_code, li.description ORDER BY i.invoice_date, i.supplier_invoice_id, li.line_number) AS first_rank,
+                                     s.supplier_code
+                              FROM supplier_invoice_item li
+                              JOIN supplier_invoice i USING(supplier_invoice_id)
+                              JOIN supplier s ON UPPER(s.canonical_name)=UPPER(i.supplier_name)
+                              WHERE {' AND '.join(where)}
+                          ) ranked_lines
+                          GROUP BY ranked_lines.supplier_code, ranked_lines.description) all_series""",
+                params,
+            )[0]
+            total_series = int(series_counts["comparable_count"] or 0)
+            insufficient_total = int(series_counts["total_count"]) - total_series
             return {
-                "status": "PARTIAL" if insufficient else "COMPLETE",
+                "status": "PARTIAL" if has_more or insufficient_total else "COMPLETE",
                 "analysis": analysis,
-                "results": comparable,
-                "comparable_series_count": len(comparable),
-                "insufficient_series_count": len(insufficient),
-                "insufficient_series": insufficient,
-                "largest_increase": comparable[0] if comparable else None,
+                "results": results,
+                "comparable_series_count": total_series,
+                "insufficient_series_count": insufficient_total,
+                "insufficient_series": [],
+                "largest_increase": results[0] if results and series_cursor is None else None,
                 "comparison_basis": "First versus latest validated unit price for the same supplier and exact item description on different invoice dates; ranked by percentage change.",
                 "authority": "VALIDATED_SCANNED_INVOICE_LINES",
+                "result_contract": {
+                    "kind": "PAGED_DETAIL",
+                    "complete_for_claim": False,
+                    "truncated": False,
+                    "claim_scope": "VALIDATED_INVOICE_LINE_SERIES_IN_FILTERED_PERIOD",
+                    "returned_rows": len(results),
+                    "has_more": has_more,
+                    "next_cursor": next_cursor,
+                    "overall_largest_increase": results[0] if series_cursor is None and results else None,
+                },
                 "citation": {"source_locator": "table=supplier_invoice_item"},
             }
         raise ValueError(f"unsupported supplier analysis: {analysis}")
@@ -884,7 +1010,8 @@ class MySQLRepository:
         }
 
     def get_supplier_cost_trend(
-        self, supplier_name: str, start_date: date, end_date: date
+        self, supplier_name: str, start_date: date, end_date: date,
+        detail_limit: int = 50, after_invoice_id: int | None = None,
     ) -> dict[str, Any]:
         _validate_period(start_date, end_date)
         supplier = supplier_name.strip()
@@ -949,20 +1076,33 @@ class MySQLRepository:
             """,
             (*matched_names, start_date, end_date),
         )
+        evidence_where = [
+            f"i.supplier_name IN ({placeholders})",
+            "i.invoice_date BETWEEN %s AND %s",
+        ]
+        evidence_params: list[Any] = [*matched_names, start_date, end_date]
+        if after_invoice_id is not None:
+            evidence_where.append("i.supplier_invoice_id > %s")
+            evidence_params.append(after_invoice_id)
         evidence = self._query(
             f"""
-            SELECT i.invoice_number, i.invoice_date, i.extraction_status,
+            SELECT i.supplier_invoice_id, i.invoice_number, i.invoice_date, i.extraction_status,
                    s.source_uri, s.ocr_json_uri
             FROM supplier_invoice i
             JOIN source_document s ON s.source_document_id=i.source_document_id
-            WHERE i.supplier_name IN ({placeholders})
-              AND i.invoice_date BETWEEN %s AND %s
-            ORDER BY i.invoice_date, i.invoice_number
+            WHERE {' AND '.join(evidence_where)}
+            ORDER BY i.supplier_invoice_id
+            LIMIT %s
             """,
-            (*matched_names, start_date, end_date),
+            [*evidence_params, detail_limit + 1],
         )
+        evidence_has_more = len(evidence) > detail_limit
+        evidence = evidence[:detail_limit]
         for source in evidence:
             source["citation"] = f"{source['source_uri']}#invoice={source['invoice_number']}"
+        next_invoice_id = evidence[-1]["supplier_invoice_id"] if evidence_has_more and evidence else None
+        for source in evidence:
+            source.pop("supplier_invoice_id", None)
         return {
             "supplier_query": supplier,
             "matched_supplier_codes": matched_codes,
@@ -971,6 +1111,20 @@ class MySQLRepository:
             "monthly": monthly,
             "item_trends": item_trends,
             "evidence": evidence,
+            "aggregate_contract": {
+                "kind": "COMPLETE_AGGREGATE",
+                "complete_for_claim": True,
+                "truncated": False,
+                "claim_scope": "MATCHED_SUPPLIER_INVOICES_IN_PERIOD",
+            },
+            "evidence_contract": {
+                "kind": "PAGED_DETAIL",
+                "complete_for_claim": False,
+                "truncated": False,
+                "returned_rows": len(evidence),
+                "has_more": evidence_has_more,
+                "next_cursor": next_invoice_id,
+            },
             "method": "Uses scanned supplier invoices; rows marked REVIEW_REQUIRED remain disclosed in monthly counts.",
             "citation": {"source_locator": "tables=supplier_invoice,supplier_invoice_item"},
         }
