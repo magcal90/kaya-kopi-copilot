@@ -382,6 +382,22 @@ class QueryToolIntegrationTest(unittest.TestCase):
         self.assertEqual(result["summary"]["receipt_count"], 263)
         self.assertEqual(result["coverage"]["missing_dates"], [])
 
+    def test_get_outlet_sales_handles_period_with_no_daily_summary_rows(self) -> None:
+        result = get_outlet_sales.invoke(
+            {
+                "outlet_code": "AMK-01",
+                "start_date": "1900-01-01",
+                "end_date": "1900-01-01",
+                "include_daily": False,
+            }
+        )
+
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(result["summary"]["reported_days"], 0)
+        self.assertEqual(result["summary"]["included_days"], 0)
+        self.assertEqual(result["summary"]["gross_takings_sgd"], "0.00")
+        self.assertEqual(result["coverage"]["missing_dates"], ["1900-01-01"])
+
     def test_monthly_sales_aggregate_is_exact_without_row_level_payload(self) -> None:
         result = get_outlet_sales.invoke(
             {

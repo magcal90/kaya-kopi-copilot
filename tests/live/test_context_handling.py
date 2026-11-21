@@ -9,8 +9,10 @@ from __future__ import annotations
 import os
 import unittest
 from dataclasses import replace
+from datetime import datetime
 from pathlib import Path
 from uuid import uuid4
+from zoneinfo import ZoneInfo
 
 from dotenv import load_dotenv
 from langchain_core.messages import AIMessage, HumanMessage
@@ -50,7 +52,13 @@ class LiveContextHandlingTest(unittest.TestCase):
         chatbot = build_chatbot(model, MemorySaver(), settings, tools=())
 
         result = chatbot.invoke(
-            {"messages": [HumanMessage(content="Reply with exactly: LIVE_OK")]},
+            {
+                "messages": [
+                    HumanMessage(
+                        content="What is today's date in YYYY-MM-DD? Use the runtime date in the system instructions and reply with only that date."
+                    )
+                ]
+            },
             config={
                 "configurable": {"thread_id": f"live-context-{uuid4()}"},
                 "recursion_limit": settings.max_agent_steps,
@@ -59,6 +67,8 @@ class LiveContextHandlingTest(unittest.TestCase):
 
         responses = [message for message in result["messages"] if isinstance(message, AIMessage)]
         self.assertTrue(responses)
+        expected_date = datetime.now(ZoneInfo("Asia/Singapore")).date().isoformat()
+        self.assertEqual(responses[-1].content.strip(), expected_date)
         usage = responses[-1].usage_metadata
         self.assertIsNotNone(usage)
         self.assertGreater(usage.get("input_tokens", 0), 0)

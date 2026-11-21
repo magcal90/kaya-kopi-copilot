@@ -200,7 +200,7 @@ class MySQLRepository:
             aggregate = self._query(
                 """
                 SELECT COUNT(*) AS reported_days,
-                       SUM(d.validation_status='OK') AS included_days,
+                       COALESCE(SUM(d.validation_status='OK'), 0) AS included_days,
                        ROUND(COALESCE(SUM(CASE WHEN d.validation_status='OK'
                            THEN d.sales_amount_sgd ELSE 0 END), 0), 2) AS gross_takings_sgd,
                        COALESCE(SUM(CASE WHEN d.validation_status='OK'

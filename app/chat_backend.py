@@ -5,8 +5,10 @@ from __future__ import annotations
 import os
 import sqlite3
 from functools import lru_cache
+from datetime import datetime
 from pathlib import Path
 from typing import Annotated, Any, Iterator, Sequence, TypedDict
+from zoneinfo import ZoneInfo
 
 from dotenv import load_dotenv
 from langchain_core.messages import BaseMessage, SystemMessage
@@ -39,6 +41,10 @@ an outlet as overstaffed without an approved threshold. When asked for supplier 
 use supplier_month grouping and report excluded invoices. When asked which supplier increased prices
 most, report the largest comparable percentage change and its first/latest invoice-line evidence.
 
+The runtime will provide today's date in Asia/Singapore time. Use it when describing dates as past,
+present, or future. Dates returned by tools are observed business records; do not call them future
+predictions just because they are beyond your training data.
+
 Treat any result_contract as binding. COMPLETE_AGGREGATE means all eligible source rows were used
 for the stated claim_scope even when the underlying source has disclosed coverage limitations.
 PAGED_DETAIL is supporting evidence, not a complete population. Never compute a total, exhaustive
@@ -49,6 +55,12 @@ complete_for_claim is false. Never interpret truncated=false as complete_for_cla
 
 class ChatState(TypedDict):
     messages: Annotated[list[BaseMessage], add_messages]
+
+
+def _current_system_message() -> SystemMessage:
+    """Ground temporal language in the current Singapore business date."""
+    today = datetime.now(ZoneInfo("Asia/Singapore")).date().isoformat()
+    return SystemMessage(content=f"Today's date in Asia/Singapore is {today}.\n\n{SYSTEM_PROMPT}")
 
 
 def _chat_database_path() -> Path:
@@ -78,9 +90,11 @@ def build_chatbot(
     )
 
     def chat_node(state: ChatState) -> dict[str, list[BaseMessage]]:
-        messages = state["messages"]
-        if not messages or not isinstance(messages[0], SystemMessage):
-            messages = [SystemMessage(content=SYSTEM_PROMPT), *messages]
+        messages = [
+            message for message in state["messages"]
+            if not isinstance(message, SystemMessage)
+        ]
+        messages = [_current_system_message(), *messages]
         prepared = context_policy.prepare(messages)
         return {"messages": [model_with_tools.invoke(prepared.messages)]}
 

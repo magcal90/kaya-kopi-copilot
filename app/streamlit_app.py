@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import sys
 import uuid
 from pathlib import Path
@@ -22,6 +23,8 @@ from app.context_policy import ContextBudgetExceeded
 
 
 st.set_page_config(page_title="Kaya Kopi Ops Copilot", page_icon="☕", layout="wide")
+
+logger = logging.getLogger(__name__)
 
 
 def _new_thread() -> str:
@@ -139,6 +142,10 @@ if prompt:
                     "Please narrow the question and try again."
                 )
             except Exception as error:
+                logger.exception(
+                    "Copilot request failed",
+                    extra={"thread_id": st.session_state.thread_id},
+                )
                 yield (
                     "I couldn't complete that check. Confirm the database is available and "
                     f"the LLM configuration is valid. Technical detail: `{type(error).__name__}`."
