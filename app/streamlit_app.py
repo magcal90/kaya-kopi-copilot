@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import sys
 import uuid
 from pathlib import Path
@@ -15,11 +16,15 @@ if str(REPOSITORY_ROOT) not in sys.path:
 
 import streamlit as st
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+from langgraph.errors import GraphRecursionError
 
 from app.chat_backend import get_chatbot, retrieve_all_threads, stream_chat
+from app.context_policy import ContextBudgetExceeded
 
 
 st.set_page_config(page_title="Kaya Kopi Ops Copilot", page_icon="☕", layout="wide")
+
+logger = logging.getLogger(__name__)
 
 
 def _new_thread() -> str:
@@ -126,7 +131,21 @@ if prompt:
                             )
                     elif isinstance(message, AIMessage) and message.content:
                         yield _text_content(message.content)
+            except ContextBudgetExceeded:
+                yield (
+                    "I couldn't process that request because it exceeds the configured context "
+                    "budget. Please shorten the question or start a new chat."
+                )
+            except GraphRecursionError:
+                yield (
+                    "I stopped because this request required too many tool steps. "
+                    "Please narrow the question and try again."
+                )
             except Exception as error:
+                logger.exception(
+                    "Copilot request failed",
+                    extra={"thread_id": st.session_state.thread_id},
+                )
                 yield (
                     "I couldn't complete that check. Confirm the database is available and "
                     f"the LLM configuration is valid. Technical detail: `{type(error).__name__}`."

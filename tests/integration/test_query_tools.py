@@ -31,6 +31,15 @@ class QueryToolIntegrationTest(unittest.TestCase):
         result = analyze_pos.invoke({"analysis": "product_mix", "outlet_codes": ["AMK-01"], "start_date": "2025-07-01", "end_date": "2026-06-30", "menu_item": "Kopi"})
         self.assertTrue(result["ok"], result)
         self.assertEqual(result["authority"], "PARTIAL_POS_EXPORT")
+        self.assertEqual(
+            result["result_contract"],
+            {
+                "kind": "COMPLETE_AGGREGATE",
+                "complete_for_claim": True,
+                "truncated": False,
+                "claim_scope": "OBSERVED_POS_ROWS",
+            },
+        )
         self.assertGreater(sum(int(row["quantity"]) for row in result["results"]), 0)
 
     def test_analyze_suppliers_spend_uses_canonical_invoice_cost(self) -> None:
@@ -39,6 +48,15 @@ class QueryToolIntegrationTest(unittest.TestCase):
         self.assertEqual(result["authority"], "SCANNED_INVOICE_CANONICAL_COST")
         self.assertEqual(sum(int(row["invoice_count"]) for row in result["results"]), 68)
         self.assertEqual(result["excluded_review_required_invoices"], 1)
+        self.assertEqual(
+            result["result_contract"],
+            {
+                "kind": "COMPLETE_AGGREGATE",
+                "complete_for_claim": True,
+                "truncated": False,
+                "claim_scope": "VALIDATED_SCANNED_INVOICES",
+            },
+        )
 
     def test_analyze_suppliers_spend_identifies_excluded_invoice(self) -> None:
         result = analyze_suppliers.invoke(
@@ -94,9 +112,9 @@ class QueryToolIntegrationTest(unittest.TestCase):
         )
 
         self.assertTrue(result["ok"], result)
-        self.assertEqual(result["status"], "PARTIAL")
+        self.assertEqual(result["status"], "COMPLETE")
         self.assertGreater(result["comparable_series_count"], 0)
-        self.assertGreater(result["insufficient_series_count"], 0)
+        self.assertEqual(result["insufficient_series_count"], 0)
         largest = result["largest_increase"]
         self.assertEqual(largest["supplier_code"], "SUP-04")
         self.assertEqual(largest["supplier_name"], "MEWAH SUGAR TRADING")
@@ -108,6 +126,40 @@ class QueryToolIntegrationTest(unittest.TestCase):
         self.assertIn("citation", largest["first_evidence"])
         self.assertIn("invoice_number", largest["latest_evidence"])
         self.assertIn("citation", largest["latest_evidence"])
+        self.assertEqual(result["result_contract"]["kind"], "PAGED_DETAIL")
+        self.assertFalse(result["result_contract"]["complete_for_claim"])
+        self.assertLessEqual(len(result["results"]), 50)
+        self.assertEqual(result["result_contract"]["has_more"], False)
+
+    def test_supplier_price_change_series_are_paginated_after_full_sql_ranking(self) -> None:
+        first = analyze_suppliers.invoke(
+            {
+                "analysis": "price_change",
+                "start_date": "2025-07-01",
+                "end_date": "2026-06-30",
+                "detail_limit": 1,
+            }
+        )
+        self.assertTrue(first["ok"], first)
+        self.assertEqual(len(first["results"]), 1)
+        self.assertTrue(first["result_contract"]["has_more"])
+        self.assertFalse(first["result_contract"]["complete_for_claim"])
+        cursor = first["result_contract"]["next_cursor"]
+        self.assertTrue(cursor)
+
+        second = analyze_suppliers.invoke(
+            {
+                "analysis": "price_change",
+                "start_date": "2025-07-01",
+                "end_date": "2026-06-30",
+                "detail_limit": 1,
+                "series_cursor": cursor,
+            }
+        )
+        self.assertTrue(second["ok"], second)
+        self.assertEqual(len(second["results"]), 1)
+        self.assertNotEqual(first["results"][0]["series_key"], second["results"][0]["series_key"])
+        self.assertFalse(second["result_contract"]["complete_for_claim"])
 
     def test_analyze_suppliers_reconciliation_keeps_reused_invoice_number(self) -> None:
         result = analyze_suppliers.invoke(
@@ -119,6 +171,41 @@ class QueryToolIntegrationTest(unittest.TestCase):
             {row["reconciliation_status"] for row in result["results"]},
             {"MATCHED", "NO_SCAN"},
         )
+
+    def test_supplier_reconciliation_pages_detail_without_implying_completeness(self) -> None:
+        first = analyze_suppliers.invoke(
+            {
+                "analysis": "reconciliation",
+                "invoice_number": "INV-042509-752",
+                "detail_limit": 1,
+            }
+        )
+
+        self.assertTrue(first["ok"], first)
+        self.assertEqual(len(first["results"]), 1)
+        self.assertEqual(first["result_contract"]["kind"], "PAGED_DETAIL")
+        self.assertFalse(first["result_contract"]["complete_for_claim"])
+        self.assertTrue(first["result_contract"]["has_more"])
+        cursor = first["result_contract"]["next_cursor"]
+        self.assertIsNotNone(cursor)
+
+        second = analyze_suppliers.invoke(
+            {
+                "analysis": "reconciliation",
+                "invoice_number": "INV-042509-752",
+                "detail_limit": 1,
+                "after_purchase_id": cursor,
+            }
+        )
+
+        self.assertTrue(second["ok"], second)
+        self.assertEqual(len(second["results"]), 1)
+        self.assertNotEqual(
+            first["results"][0]["supplier_purchase_id"],
+            second["results"][0]["supplier_purchase_id"],
+        )
+        self.assertFalse(second["result_contract"]["has_more"])
+        self.assertFalse(second["result_contract"]["complete_for_claim"])
 
     def test_reconciliation_distinguishes_identity_match_from_amount_match_and_gst(self) -> None:
         result = analyze_suppliers.invoke(
@@ -170,6 +257,15 @@ class QueryToolIntegrationTest(unittest.TestCase):
         self.assertEqual(result["results"][0]["authority"], "DAILY_SUMMARY_Z_REPORT")
         self.assertEqual(result["results"][0]["gross_takings_sgd"], "815.51")
         self.assertEqual(result["results"][0]["receipt_count"], 263)
+        self.assertEqual(
+            result["result_contract"],
+            {
+                "kind": "COMPLETE_AGGREGATE",
+                "complete_for_claim": True,
+                "truncated": False,
+                "claim_scope": "REPORTED_SOURCE_ROWS",
+            },
+        )
 
     def test_analyze_outlets_preserves_alias_resolution_evidence(self) -> None:
         result = analyze_outlets.invoke(
@@ -286,6 +382,51 @@ class QueryToolIntegrationTest(unittest.TestCase):
         self.assertEqual(result["summary"]["receipt_count"], 263)
         self.assertEqual(result["coverage"]["missing_dates"], [])
 
+    def test_get_outlet_sales_handles_period_with_no_daily_summary_rows(self) -> None:
+        result = get_outlet_sales.invoke(
+            {
+                "outlet_code": "AMK-01",
+                "start_date": "1900-01-01",
+                "end_date": "1900-01-01",
+                "include_daily": False,
+            }
+        )
+
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(result["summary"]["reported_days"], 0)
+        self.assertEqual(result["summary"]["included_days"], 0)
+        self.assertEqual(result["summary"]["gross_takings_sgd"], "0.00")
+        self.assertEqual(result["coverage"]["missing_dates"], ["1900-01-01"])
+
+    def test_monthly_sales_aggregate_is_exact_without_row_level_payload(self) -> None:
+        result = get_outlet_sales.invoke(
+            {
+                "outlet_code": "AMK-01",
+                "start_date": "2025-07-01",
+                "end_date": "2025-07-31",
+                "include_daily": False,
+            }
+        )
+
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(result["summary"]["gross_takings_sgd"], "26159.57")
+        self.assertEqual(result["summary"]["receipt_count"], 8427)
+        self.assertEqual(result["summary"]["reported_days"], 27)
+        self.assertEqual(result["coverage"]["missing_dates"], [
+            "2025-07-07", "2025-07-08", "2025-07-11", "2025-07-12"
+        ])
+        self.assertEqual(
+            result["result_contract"],
+            {
+                "kind": "COMPLETE_AGGREGATE",
+                "complete_for_claim": True,
+                "truncated": False,
+                "claim_scope": "REPORTED_SOURCE_ROWS",
+            },
+        )
+        self.assertNotIn("records", result["citation"])
+        self.assertEqual(result["citation"]["record_count"], 27)
+
     def test_get_outlet_sales(self) -> None:
         result = get_outlet_sales.invoke(
             {
@@ -372,6 +513,9 @@ class QueryToolIntegrationTest(unittest.TestCase):
         self.assertEqual(result["matched_supplier_codes"], ["SUP-04"])
         self.assertTrue(result["monthly"])
         self.assertTrue(all("citation" in row for row in result["evidence"]))
+        self.assertEqual(result["aggregate_contract"]["kind"], "COMPLETE_AGGREGATE")
+        self.assertEqual(result["evidence_contract"]["kind"], "PAGED_DETAIL")
+        self.assertFalse(result["evidence_contract"]["complete_for_claim"])
 
     def test_search_documents(self) -> None:
         result = search_documents.invoke(

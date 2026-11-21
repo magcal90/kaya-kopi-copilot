@@ -52,6 +52,26 @@ docker compose --profile test run --rm test python scripts/run_llm_acceptance.py
 This uses the configured OpenAI key and prints each answer beside its expected evidence checklist;
 it is intentionally not part of the automated test suite.
 
+Agent context and execution limits are configured in `.env`; see `.env.example` for the available
+`KAYA_LLM_*` and `KAYA_AGENT_MAX_STEPS` settings. Defaults are applied when these optional values are
+absent, and invalid limits fail at application startup. Conversation checkpoints retain full history,
+while only the most recent complete turns that fit the configured input budget are sent to OpenAI.
+Model-visible tool results are also capped by `KAYA_TOOL_MAX_RESULT_BYTES`. Complete financial
+aggregates are calculated from all eligible rows before that cap is applied; an oversized result fails
+closed instead of being truncated. Paginated detail is labelled incomplete and must not be summed by
+the model.
+
+The context-handling live acceptance test is also opt-in because it consumes API credit:
+
+```bash
+docker compose --profile test run --rm \
+  -e KAYA_RUN_LIVE_LLM_TESTS=1 \
+  test python -m unittest tests.live.test_context_handling -v
+```
+
+It makes one short request to the configured OpenAI model and verifies returned token-usage metadata
+and the output-token limit. Normal `unittest discover` runs skip this test and make no paid LLM calls.
+
 See [ingestion/README.md](ingestion/README.md) for individual parser, schema and loader commands.
 
 ## Rules of engagement
