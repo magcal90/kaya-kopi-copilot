@@ -38,7 +38,7 @@ class LLMUsageTrackerTest(unittest.TestCase):
                     "input_token_details": {"cached_tokens": 20},
                 },
                 response_metadata={},
-                tool_calls=[{"name": "analyze_outlets"}],
+                tool_calls=[{"name": "analyze_outlets_sql"}],
             )
             tracker.record_model_call(
                 request_id="request-1",
@@ -67,7 +67,7 @@ class LLMUsageTrackerTest(unittest.TestCase):
                     "SELECT tool_call_count, tool_calls_json, latency_ms FROM llm_request_events"
                 ).fetchone()
             self.assertEqual(request[0], 1)
-            self.assertEqual(json.loads(request[1]), ["analyze_outlets"])
+            self.assertEqual(json.loads(request[1]), ["analyze_outlets_sql"])
             self.assertEqual(request[2], 500)
 
     def test_records_429_status_and_error_type(self) -> None:

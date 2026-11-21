@@ -147,7 +147,7 @@ def _call(method: str, *args: Any, **kwargs: Any) -> dict[str, Any]:
         }
 
 
-@tool("analyze_outlets", args_schema=AnalyzeOutletsInput)
+@tool("analyze_outlets_sql", args_schema=AnalyzeOutletsInput)
 def analyze_outlets(
     analysis: str,
     start_date: date,
@@ -158,7 +158,7 @@ def analyze_outlets(
     return _call("analyze_outlets", analysis, outlet_codes or [], start_date, end_date)
 
 
-@tool("analyze_pos", args_schema=AnalyzePosInput)
+@tool("analyze_pos_sql", args_schema=AnalyzePosInput)
 def analyze_pos(
     analysis: str, start_date: date, end_date: date,
     outlet_codes: list[str] | None = None, menu_item: str | None = None,
@@ -167,7 +167,7 @@ def analyze_pos(
     return _call("analyze_pos", analysis, outlet_codes or [], start_date, end_date, menu_item)
 
 
-@tool("analyze_suppliers", args_schema=AnalyzeSuppliersInput)
+@tool("analyze_suppliers_sql", args_schema=AnalyzeSuppliersInput)
 def analyze_suppliers(
     analysis: str, supplier_query: str | None = None, invoice_number: str | None = None,
     start_date: date | None = None, end_date: date | None = None,
@@ -182,13 +182,13 @@ def analyze_suppliers(
     )
 
 
-@tool("get_data_coverage", args_schema=DataCoverageInput)
+@tool("get_data_coverage_sql", args_schema=DataCoverageInput)
 def get_data_coverage(area: str = "all") -> dict[str, Any]:
     """Report objective source coverage and known completeness limitations."""
     return _call("get_data_coverage", area)
 
 
-@tool("assess_kopi_price_change", args_schema=KopiPriceChangeInput)
+@tool("assess_kopi_price_change_sql", args_schema=KopiPriceChangeInput)
 def assess_kopi_price_change(
     start_date: date, end_date: date, menu_scope: str = "base_kopi",
     gross_price_increase_sgd: Decimal = Decimal("0.10"),
@@ -204,7 +204,7 @@ def assess_kopi_price_change(
     )
 
 
-@tool("get_outlet_sales", args_schema=OutletSalesInput)
+@tool("get_outlet_sales_sql", args_schema=OutletSalesInput)
 def get_outlet_sales(
     outlet_code: str, start_date: date, end_date: date, include_daily: bool = True
 ) -> dict[str, Any]:
@@ -212,7 +212,7 @@ def get_outlet_sales(
     return _call("get_outlet_sales", outlet_code, start_date, end_date, include_daily)
 
 
-@tool("compare_outlets", args_schema=CompareOutletsInput)
+@tool("compare_outlets_sql", args_schema=CompareOutletsInput)
 def compare_outlets(
     outlet_codes: list[str], start_date: date, end_date: date
 ) -> dict[str, Any]:
@@ -220,13 +220,13 @@ def compare_outlets(
     return _call("compare_outlets", outlet_codes, start_date, end_date)
 
 
-@tool("get_invoice", args_schema=InvoiceInput)
+@tool("get_invoice_sql", args_schema=InvoiceInput)
 def get_invoice(invoice_number: str) -> dict[str, Any]:
     """Get one scanned supplier invoice, its item rows, review state, reconciliation, and citation."""
     return _call("get_invoice", invoice_number)
 
 
-@tool("get_supplier_cost_trend", args_schema=SupplierTrendInput)
+@tool("get_supplier_cost_trend_sql", args_schema=SupplierTrendInput)
 def get_supplier_cost_trend(
     supplier_name: str, start_date: date, end_date: date,
     detail_limit: int = 50, after_invoice_id: int | None = None,
@@ -238,7 +238,7 @@ def get_supplier_cost_trend(
     )
 
 
-@tool("search_documents", args_schema=DocumentSearchInput)
+@tool("search_documents_sql", args_schema=DocumentSearchInput)
 def search_documents(
     query: str,
     limit: int = 5,
@@ -249,7 +249,7 @@ def search_documents(
     return _call("search_documents", query, limit, outlet_code, supplier_name)
 
 
-@tool("get_data_quality_issues", args_schema=QualityIssuesInput)
+@tool("get_data_quality_issues_sql", args_schema=QualityIssuesInput)
 def get_data_quality_issues(
     status: str = "OPEN",
     severity: str | None = None,

@@ -9,13 +9,16 @@ from app.tools import ALL_TOOLS
 
 Tools:
 
-- `analyze_outlets`: authoritative performance, measured wastage, and roster-based staffing;
-- `analyze_pos`: observed product mix, prices, payment modes, and time-of-day patterns from the explicitly partial POS export;
-- `analyze_suppliers`: scanned invoices, canonical spend, cost trends, item price changes, and purchase reconciliation;
-- `get_data_coverage`: objective source counts and completeness limitations;
-- `search_documents`: MySQL full-text search with substring fallback and entity filters;
-- `assess_kopi_price_change`: transparent price sensitivity scenarios with an insufficient-evidence decision state; and
-- `get_data_quality_issues`: bounded review queue with source citations.
+- `analyze_outlets_sql`: authoritative performance, measured wastage, and roster-based staffing;
+- `analyze_pos_sql`: observed product mix, prices, payment modes, and time-of-day patterns from the explicitly partial POS export;
+- `analyze_suppliers_sql`: scanned invoices, canonical spend, cost trends, item price changes, and purchase reconciliation;
+- `get_data_coverage_sql`: objective source counts and completeness limitations;
+- `search_documents_sql`: MySQL full-text search with substring fallback and entity filters;
+- `assess_kopi_price_change_sql`: transparent price sensitivity scenarios with an insufficient-evidence decision state; and
+- `get_data_quality_issues_sql`: bounded review queue with source citations.
+
+The `_sql` suffix marks tools backed by the relational MySQL data. A future semantic retrieval tool
+can use a distinct name such as `search_documents_vector`.
 
 The older narrow Python functions remain importable as compatibility wrappers, but are not exposed
 to the model in `ALL_TOOLS`. Sales analysis resolves effective aliases such as `AMK-3A` to `AMK-03`.
