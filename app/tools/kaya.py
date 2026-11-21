@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from datetime import date
 from decimal import Decimal
 from functools import lru_cache
@@ -14,6 +15,9 @@ from pydantic import BaseModel, Field
 from app.repositories.mysql import MySQLRepository
 from app.settings import AgentSettings
 from app.tool_result_policy import ToolResultPolicy
+
+
+logger = logging.getLogger(__name__)
 
 
 class OutletSalesInput(BaseModel):
@@ -135,6 +139,7 @@ def _call(method: str, *args: Any, **kwargs: Any) -> dict[str, Any]:
     except ValueError as error:
         return {"ok": False, "error": str(error), "error_type": "validation"}
     except pymysql.MySQLError:
+        logger.exception("Database-backed tool failed", extra={"operation": method})
         return {
             "ok": False,
             "error": "The database query failed. Check database availability and configuration.",

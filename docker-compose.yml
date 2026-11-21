@@ -48,6 +48,7 @@ services:
       KAYA_DB_PASSWORD: ${KAYA_DB_PASSWORD}
       KAYA_DB_NAME: ${KAYA_DB_NAME}
       KAYA_CHAT_DB: /runtime/kaya_chat.sqlite3
+      KAYA_USAGE_DB: /runtime/kaya_usage.sqlite3
     ports:
       - "${KAYA_STREAMLIT_HOST_PORT:-8501}:8501"
     volumes:
@@ -74,6 +75,7 @@ services:
       KAYA_DB_PASSWORD: ${KAYA_DB_PASSWORD}
       KAYA_DB_NAME: ${KAYA_DB_NAME}
       KAYA_CHAT_DB: /tmp/kaya-test-chat.sqlite3
+      KAYA_USAGE_DB: /tmp/kaya-test-usage.sqlite3
     depends_on:
       mysql:
         condition: service_healthy

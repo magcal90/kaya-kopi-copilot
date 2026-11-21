@@ -61,6 +61,22 @@ aggregates are calculated from all eligible rows before that cap is applied; an 
 closed instead of being truncated. Paginated detail is labelled incomplete and must not be summed by
 the model.
 
+LLM observability records one row per LangChain model invocation and one summary per user request in
+the persistent `/runtime/kaya_usage.sqlite3` ledger. Structured `llm_call`, `llm_request`, and budget
+alert events are also written to the Copilot logs. The sidebar shows current UTC-month tracked usage
+and the active conversation's tokens, model calls, and estimated spend. Default monthly alert
+thresholds are USD 40 and USD 45 against a USD 50 tracked budget; configure them with the
+`KAYA_LLM_BUDGET_*` settings in `.env.example`.
+
+Spend is an estimate calculated from provider-reported token usage and the configured model prices.
+The default prices are for `gpt-4o-mini`; update the three `KAYA_LLM_*PRICE*` settings when changing
+models. This local ledger is not a live OpenAI credit balance, excludes spend before the ledger was
+introduced and usage by other clients, and does not block requests at the configured budget. Keep the
+OpenAI project billing limit as the authoritative spend control. The configured `KAYA_LLM_MAX_RETRIES`
+is passed to the OpenAI client; eligible transient 429/5xx responses may be retried internally by its
+SDK, while the app logs the final outcome and HTTP status. Model-call counts represent application
+invocations and do not include those internal HTTP attempts.
+
 The context-handling live acceptance test is also opt-in because it consumes API credit:
 
 ```bash
@@ -71,6 +87,15 @@ docker compose --profile test run --rm \
 
 It makes one short request to the configured OpenAI model and verifies returned token-usage metadata
 and the output-token limit. Normal `unittest discover` runs skip this test and make no paid LLM calls.
+
+The live observability test also consumes API credit and verifies that a real model call writes usage
+metadata to the SQLite ledger:
+
+```bash
+docker compose --profile test run --rm \
+  -e KAYA_RUN_LIVE_LLM_TESTS=1 \
+  test python -m unittest tests.live.test_llm_observability -v
+```
 
 See [ingestion/README.md](ingestion/README.md) for individual parser, schema and loader commands.
 

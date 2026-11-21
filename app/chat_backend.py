@@ -2,16 +2,20 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import sqlite3
+import time
+from datetime import datetime, timezone
 from functools import lru_cache
-from datetime import datetime
 from pathlib import Path
 from typing import Annotated, Any, Iterator, Sequence, TypedDict
+from uuid import uuid4
 from zoneinfo import ZoneInfo
 
 from dotenv import load_dotenv
 from langchain_core.messages import BaseMessage, SystemMessage
+from langchain_core.runnables import RunnableConfig
 from langchain_openai import ChatOpenAI
 from langgraph.checkpoint.sqlite import SqliteSaver
 from langgraph.graph import END, START, StateGraph
@@ -19,6 +23,7 @@ from langgraph.graph.message import add_messages
 from langgraph.prebuilt import ToolNode, tools_condition
 
 from app.context_policy import ContextPolicy
+from app.llm_observability import LLMUsageTracker, usage_settings_from_env
 from app.settings import AgentSettings
 from app.tools import ALL_TOOLS
 
@@ -52,6 +57,8 @@ ranking, or complete-period claim from PAGED_DETAIL, LIMIT_EXCEEDED, or a result
 complete_for_claim is false. Never interpret truncated=false as complete_for_claim=true.
 """
 
+logger = logging.getLogger(__name__)
+
 
 class ChatState(TypedDict):
     messages: Annotated[list[BaseMessage], add_messages]
@@ -70,6 +77,39 @@ def _chat_database_path() -> Path:
 
 
 @lru_cache(maxsize=1)
+def get_usage_tracker() -> LLMUsageTracker:
+    """Return the persistent SQLite-backed API usage tracker."""
+    settings = get_agent_settings()
+    return LLMUsageTracker(usage_settings_from_env(settings.model))
+
+
+def _get_usage_tracker_safely() -> LLMUsageTracker | None:
+    try:
+        return get_usage_tracker()
+    except Exception:
+        logger.exception("Unable to initialize LLM usage tracking; continuing without the ledger")
+        return None
+
+
+def _record_call_safely(tracker: LLMUsageTracker | None, **event: Any) -> None:
+    if tracker is None:
+        return
+    try:
+        tracker.record_model_call(**event)
+    except Exception:
+        logger.exception("Unable to persist LLM usage event")
+
+
+def _finish_request_safely(tracker: LLMUsageTracker | None, **event: Any) -> None:
+    if tracker is None:
+        return
+    try:
+        tracker.finish_request(**event)
+    except Exception:
+        logger.exception("Unable to persist LLM request summary")
+
+
+@lru_cache(maxsize=1)
 def get_agent_settings() -> AgentSettings:
     """Load and validate runtime configuration once per process."""
     load_dotenv(Path(__file__).resolve().parents[1] / ".env")
@@ -81,6 +121,7 @@ def build_chatbot(
     checkpointer: Any,
     settings: AgentSettings,
     tools: Sequence[Any] = ALL_TOOLS,
+    usage_tracker: LLMUsageTracker | None = None,
 ):
     """Build the bounded tool-calling graph around an injected chat model."""
     model_with_tools = model.bind_tools(tools) if tools else model
@@ -89,14 +130,41 @@ def build_chatbot(
         token_counter=model.get_num_tokens_from_messages,
     )
 
-    def chat_node(state: ChatState) -> dict[str, list[BaseMessage]]:
+    def chat_node(state: ChatState, config: RunnableConfig) -> dict[str, list[BaseMessage]]:
         messages = [
             message for message in state["messages"]
             if not isinstance(message, SystemMessage)
         ]
         messages = [_current_system_message(), *messages]
         prepared = context_policy.prepare(messages)
-        return {"messages": [model_with_tools.invoke(prepared.messages)]}
+        configurable = config.get("configurable", {})
+        request_id = str(configurable.get("kaya_request_id") or uuid4())
+        thread_id = str(configurable.get("thread_id", "unknown"))
+        started = time.perf_counter()
+        try:
+            response = model_with_tools.invoke(prepared.messages)
+        except Exception as error:
+            _record_call_safely(
+                usage_tracker,
+                request_id=request_id,
+                thread_id=thread_id,
+                latency_ms=(time.perf_counter() - started) * 1000,
+                error=error,
+            )
+            if usage_tracker is None:
+                logger.exception(
+                    "LLM invocation failed",
+                    extra={"request_id": request_id, "thread_id": thread_id},
+                )
+            raise
+        _record_call_safely(
+            usage_tracker,
+            request_id=request_id,
+            thread_id=thread_id,
+            latency_ms=(time.perf_counter() - started) * 1000,
+            message=response,
+        )
+        return {"messages": [response]}
 
     graph = StateGraph(ChatState)
     graph.add_node("chat", chat_node)
@@ -129,7 +197,7 @@ def get_chatbot():
 
     connection = sqlite3.connect(_chat_database_path(), check_same_thread=False)
     checkpointer = SqliteSaver(connection)
-    return build_chatbot(model, checkpointer, settings)
+    return build_chatbot(model, checkpointer, settings, usage_tracker=_get_usage_tracker_safely())
 
 
 def retrieve_all_threads() -> list[str]:
@@ -149,12 +217,31 @@ def stream_chat(thread_id: str, message: str) -> Iterator[tuple[BaseMessage, dic
     """Stream one user turn through the LLM/tool loop."""
     from langchain_core.messages import HumanMessage
 
+    request_id = str(uuid4())
+    started_at = datetime.now(timezone.utc)
+    started = time.perf_counter()
+    tracker = _get_usage_tracker_safely()
     config = {
-        "configurable": {"thread_id": thread_id},
+        "configurable": {"thread_id": thread_id, "kaya_request_id": request_id},
         "recursion_limit": get_agent_settings().max_agent_steps,
     }
-    yield from get_chatbot().stream(
-        {"messages": [HumanMessage(content=message)]},
-        config=config,
-        stream_mode="messages",
-    )
+    outcome, error = "succeeded", None
+    try:
+        yield from get_chatbot().stream(
+            {"messages": [HumanMessage(content=message)]},
+            config=config,
+            stream_mode="messages",
+        )
+    except Exception as exception:
+        outcome, error = "failed", exception
+        raise
+    finally:
+        _finish_request_safely(
+            tracker,
+            request_id=request_id,
+            thread_id=thread_id,
+            started_at=started_at,
+            latency_ms=(time.perf_counter() - started) * 1000,
+            outcome=outcome,
+            error=error,
+        )
